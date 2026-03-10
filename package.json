@@ -1,0 +1,19 @@
+{
+  "name": "apollo-client",
+  "version": "0.1.0",
+  "description": "Desktop client shell for the Apollo music server.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "keywords": [
+    "apollo",
+    "electron",
+    "music-client"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^37.0.0"
+  }
+}
