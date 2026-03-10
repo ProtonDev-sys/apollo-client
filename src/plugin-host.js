@@ -31,6 +31,43 @@ export function createPluginHost(sharedApi) {
   const plugins = [];
   const detailTabs = [];
   const lyricsProviders = [];
+  const eventListeners = new Map();
+  const pluginApis = new Map();
+  const pluginDisposers = new Map();
+
+  function subscribe(eventName, handler) {
+    if (!eventName || typeof handler !== "function") {
+      throw new Error("Plugins must subscribe with an event name and handler.");
+    }
+
+    const listeners = eventListeners.get(eventName) || [];
+    listeners.push(handler);
+    eventListeners.set(eventName, listeners);
+
+    return () => {
+      const currentListeners = eventListeners.get(eventName) || [];
+      const nextListeners = currentListeners.filter((listener) => listener !== handler);
+
+      if (nextListeners.length) {
+        eventListeners.set(eventName, nextListeners);
+        return;
+      }
+
+      eventListeners.delete(eventName);
+    };
+  }
+
+  function emit(eventName, payload = {}) {
+    const listeners = eventListeners.get(eventName) || [];
+
+    listeners.forEach((listener) => {
+      try {
+        listener(payload);
+      } catch {
+        // Ignore plugin event failures so one bad subscriber does not break the host.
+      }
+    });
+  }
 
   function registerDetailTab(plugin, tab) {
     if (!tab?.id || !tab?.label || typeof tab.mount !== "function") {
@@ -56,24 +93,63 @@ export function createPluginHost(sharedApi) {
     sortByOrder(lyricsProviders);
   }
 
+  function createPluginApi(plugin) {
+    const cleanups = [];
+    const registerCleanup = (cleanup) => {
+      if (typeof cleanup === "function") {
+        cleanups.push(cleanup);
+      }
+    };
+
+    pluginDisposers.set(plugin.id, () => {
+      while (cleanups.length) {
+        const cleanup = cleanups.pop();
+
+        try {
+          cleanup();
+        } catch {
+          // Ignore plugin cleanup failures during host shutdown.
+        }
+      }
+    });
+
+    return {
+      ...sharedApi,
+      on(eventName, handler) {
+        const unsubscribe = subscribe(eventName, handler);
+        registerCleanup(unsubscribe);
+        return unsubscribe;
+      },
+      emit,
+      onDispose: registerCleanup,
+      registerDetailTab: (tab) => registerDetailTab(plugin, tab),
+      registerLyricsProvider: (provider) => registerLyricsProvider(plugin, provider)
+    };
+  }
+
   async function loadPlugins(pluginModules) {
     for (const plugin of pluginModules) {
       if (!plugin?.id || typeof plugin.setup !== "function") {
         continue;
       }
 
-      const api = {
-        ...sharedApi,
-        registerDetailTab: (tab) => registerDetailTab(plugin, tab),
-        registerLyricsProvider: (provider) => registerLyricsProvider(plugin, provider)
-      };
+      const api = createPluginApi(plugin);
+      pluginApis.set(plugin.id, api);
+      const dispose = await plugin.setup(api);
 
-      await plugin.setup(api);
+      if (typeof dispose === "function") {
+        api.onDispose(dispose);
+      }
+
       plugins.push({
         id: plugin.id,
         name: plugin.name || plugin.id
       });
     }
+
+    emit("plugins:loaded", {
+      plugins: plugins.map((plugin) => ({ ...plugin }))
+    });
   }
 
   async function resolveLyrics(track) {
@@ -114,21 +190,60 @@ export function createPluginHost(sharedApi) {
       return () => {};
     }
 
+    const mountSubscriptions = [];
     const cleanup = tab.mount({
       container,
       context,
+      api: pluginApis.get(tab.pluginId) || sharedApi,
+      apollo: sharedApi.apollo,
+      plugin: {
+        id: tab.pluginId
+      },
       services: {
-        resolveLyrics
+        resolveLyrics,
+        emit,
+        on(eventName, handler) {
+          const unsubscribe = subscribe(eventName, handler);
+          mountSubscriptions.push(unsubscribe);
+          return unsubscribe;
+        }
       }
     });
 
-    return typeof cleanup === "function" ? cleanup : () => {};
+    return () => {
+      if (typeof cleanup === "function") {
+        cleanup();
+      }
+
+      while (mountSubscriptions.length) {
+        const unsubscribe = mountSubscriptions.pop();
+        unsubscribe();
+      }
+    };
+  }
+
+  function getPlugins() {
+    return plugins.map((plugin) => ({ ...plugin }));
+  }
+
+  function dispose() {
+    for (const disposer of pluginDisposers.values()) {
+      disposer();
+    }
+
+    pluginDisposers.clear();
+    pluginApis.clear();
+    eventListeners.clear();
   }
 
   return {
     getDetailTabs,
+    getPlugins,
     loadPlugins,
     mountDetailTab,
+    dispose,
+    emit,
+    on: subscribe,
     plugins
   };
 }

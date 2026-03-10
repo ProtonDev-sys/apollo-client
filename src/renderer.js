@@ -6,6 +6,7 @@ const LAYOUT_STORAGE_KEY = "apollo-layout-v1";
 const SETTINGS_STORAGE_KEY = "apollo-settings-v1";
 const PLAYBACK_STATE_STORAGE_KEY = "apollo-playback-state-v1";
 const AUTH_STORAGE_KEY = "apollo-auth-session-v1";
+const desktopDiscordDefaults = window.apolloDesktop?.discordPresenceDefaults || {};
 const DEFAULT_LAYOUT = {
   order: ["sidebar", "tracks", "detail"],
   widths: {
@@ -43,6 +44,17 @@ const DEFAULT_SETTINGS = {
   },
   downloads: {
     autoRefreshLibrary: true
+  },
+  integrations: {
+    discord: {
+      enabled: Boolean(desktopDiscordDefaults.enabled),
+      clientId: desktopDiscordDefaults.clientId || "",
+      largeImageKey: desktopDiscordDefaults.largeImageKey || "",
+      largeImageText: desktopDiscordDefaults.largeImageText || "Apollo Client",
+      smallImageKeyPlaying: desktopDiscordDefaults.smallImageKeyPlaying || "",
+      smallImageKeyPaused: desktopDiscordDefaults.smallImageKeyPaused || "",
+      smallImageKeyBuffering: desktopDiscordDefaults.smallImageKeyBuffering || ""
+    }
   }
 };
 const searchProviderOrder = ["youtube", "spotify", "soundcloud"];
@@ -84,6 +96,8 @@ const state = {
   playbackTrackKey: savedPlaybackState.playbackTrackKey || null,
   activeMenuTrackKey: null,
   activeMenuAnchor: null,
+  activePlaylistMenuId: null,
+  activePlaylistMenuAnchor: null,
   activeDetailTab: savedPlaybackState.activeDetailTab || "track",
   query: "",
   searchResults: [],
@@ -107,11 +121,7 @@ const durationCache = new Map();
 const playbackUrlCache = new Map();
 const pendingDurationKeys = new Set();
 const likedTracks = loadLikedTracks();
-const pluginHost = createPluginHost({
-  escapeHtml,
-  formatDuration,
-  providerLabel
-});
+let pluginHost;
 
 let detailTabCleanup = null;
 let resizeSession = null;
@@ -162,6 +172,7 @@ const playlistModalClose = document.querySelector("#playlist-modal-close");
 const playlistFormCancel = document.querySelector("#playlist-form-cancel");
 const playlistSubmitButton = document.querySelector("#playlist-submit-button");
 const playlistDeleteButton = document.querySelector("#playlist-delete-button");
+const playlistArtworkChoose = document.querySelector("#playlist-artwork-choose");
 const playlistArtworkInput = document.querySelector("#playlist-artwork-input");
 const playlistArtworkPreview = document.querySelector("#playlist-artwork-preview");
 const playlistArtworkStatus = document.querySelector("#playlist-artwork-status");
@@ -195,6 +206,13 @@ const settingsProviderSpotify = document.querySelector("#settings-provider-spoti
 const settingsProviderSoundcloud = document.querySelector("#settings-provider-soundcloud");
 const settingsSearchDelay = document.querySelector("#settings-search-delay");
 const settingsAutoRefreshLibrary = document.querySelector("#settings-auto-refresh-library");
+const settingsDiscordEnabled = document.querySelector("#settings-discord-enabled");
+const settingsDiscordClientId = document.querySelector("#settings-discord-client-id");
+const settingsDiscordLargeImageKey = document.querySelector("#settings-discord-large-image-key");
+const settingsDiscordLargeImageText = document.querySelector("#settings-discord-large-image-text");
+const settingsDiscordSmallImagePlaying = document.querySelector("#settings-discord-small-image-playing");
+const settingsDiscordSmallImagePaused = document.querySelector("#settings-discord-small-image-paused");
+const settingsDiscordSmallImageBuffering = document.querySelector("#settings-discord-small-image-buffering");
 
 function loadLikedTracks() {
   try {
@@ -312,6 +330,25 @@ function mergeSettings(base, override) {
   });
 
   merged.downloads.autoRefreshLibrary = override?.downloads?.autoRefreshLibrary ?? merged.downloads.autoRefreshLibrary;
+  merged.integrations.discord.enabled = override?.integrations?.discord?.enabled ?? merged.integrations.discord.enabled;
+  merged.integrations.discord.clientId = typeof override?.integrations?.discord?.clientId === "string"
+    ? override.integrations.discord.clientId.trim()
+    : merged.integrations.discord.clientId;
+  merged.integrations.discord.largeImageKey = typeof override?.integrations?.discord?.largeImageKey === "string"
+    ? override.integrations.discord.largeImageKey.trim()
+    : merged.integrations.discord.largeImageKey;
+  merged.integrations.discord.largeImageText = typeof override?.integrations?.discord?.largeImageText === "string"
+    ? override.integrations.discord.largeImageText.trim()
+    : merged.integrations.discord.largeImageText;
+  merged.integrations.discord.smallImageKeyPlaying = typeof override?.integrations?.discord?.smallImageKeyPlaying === "string"
+    ? override.integrations.discord.smallImageKeyPlaying.trim()
+    : merged.integrations.discord.smallImageKeyPlaying;
+  merged.integrations.discord.smallImageKeyPaused = typeof override?.integrations?.discord?.smallImageKeyPaused === "string"
+    ? override.integrations.discord.smallImageKeyPaused.trim()
+    : merged.integrations.discord.smallImageKeyPaused;
+  merged.integrations.discord.smallImageKeyBuffering = typeof override?.integrations?.discord?.smallImageKeyBuffering === "string"
+    ? override.integrations.discord.smallImageKeyBuffering.trim()
+    : merged.integrations.discord.smallImageKeyBuffering;
   return merged;
 }
 
@@ -656,6 +693,10 @@ async function signInWithSecret(secret) {
   persistAuthSession();
   playbackUrlCache.clear();
   closeAuthModal();
+  pluginHost?.emit("auth:changed", {
+    authenticated: Boolean(state.auth.token),
+    auth: { ...state.auth }
+  });
 }
 
 async function signOut() {
@@ -679,10 +720,16 @@ async function signOut() {
   audioPlayer.removeAttribute("src");
   audioPlayer.load();
   updateAuthButton();
+  syncDiscordPresence();
 
   if (state.auth.enabled) {
     openAuthModal("Signed out. Enter the Apollo shared secret to continue.");
   }
+
+  pluginHost?.emit("auth:changed", {
+    authenticated: false,
+    auth: { ...state.auth }
+  });
 }
 
 function buildTrackKey(prefix, id) {
@@ -921,7 +968,280 @@ function createDetailContext() {
     getPlaybackTrackKey: () => state.playbackTrackKey,
     getSelectedTrack,
     isTrackLiked,
-    providerLabel
+    providerLabel,
+    apollo: createPluginRuntime()
+  };
+}
+
+function createPluginStateSnapshot() {
+  return {
+    apiBase: state.apiBase,
+    layout: structuredClone(state.layout),
+    settings: structuredClone(state.settings),
+    auth: { ...state.auth },
+    selectedPlaylistId: state.selectedPlaylistId,
+    selectedTrackKey: state.selectedTrackKey,
+    playbackTrackKey: state.playbackTrackKey,
+    activeDetailTab: state.activeDetailTab,
+    query: state.query,
+    isConnected: state.isConnected,
+    isLoading: state.isLoading,
+    isBuffering: state.isBuffering,
+    isPlaying: state.isPlaying,
+    message: state.message,
+    repeatMode: state.repeatMode
+  };
+}
+
+function createPluginPlaybackSnapshot() {
+  const track = getPlaybackTrack();
+  return {
+    track,
+    trackKey: state.playbackTrackKey,
+    isPlaying: state.isPlaying,
+    isBuffering: state.isBuffering,
+    currentTime: audioPlayer.currentTime || 0,
+    duration: audioPlayer.duration || (track ? getCachedDuration(track) || 0 : 0),
+    paused: audioPlayer.paused,
+    muted: audioPlayer.muted,
+    volume: audioPlayer.volume,
+    playbackRate: audioPlayer.playbackRate,
+    repeatMode: state.repeatMode
+  };
+}
+
+function setStatusMessage(message = "") {
+  state.message = String(message || "");
+  renderStatus();
+}
+
+async function setQuery(query, { run = false } = {}) {
+  state.query = String(query ?? "").trim();
+  searchInput.value = state.query;
+
+  if (run) {
+    await runSearch();
+    return;
+  }
+
+  if (!state.query) {
+    state.searchResults = [];
+    syncSelectedTrack();
+  }
+
+  render();
+}
+
+async function playTrack(trackOrKey, { autoplay = true } = {}) {
+  const track = typeof trackOrKey === "string" ? getTrackByKey(trackOrKey) : trackOrKey;
+
+  if (!track?.key) {
+    return null;
+  }
+
+  selectTrack(track.key, { autoplay: false });
+
+  if (autoplay) {
+    await playSelectedTrack();
+  }
+
+  return track;
+}
+
+function setActiveDetailTab(tabId, { persist = true, renderPanel = true } = {}) {
+  if (!tabId) {
+    return;
+  }
+
+  state.activeDetailTab = tabId;
+
+  if (persist) {
+    persistPlaybackState();
+  }
+
+  if (renderPanel) {
+    renderDetailPanel();
+  }
+
+  pluginHost?.emit("detail:tab-change", {
+    tabId,
+    activeTrack: getPlaybackTrack() || getSelectedTrack()
+  });
+}
+
+function commitPluginChanges(options = {}) {
+  const {
+    renderApp = true,
+    renderStatusOnly = false,
+    playback = false,
+    settings = false,
+    layout = false,
+    likes = false,
+    auth = false
+  } = options;
+
+  if (likes) {
+    persistLikedTracks();
+  }
+
+  if (auth) {
+    persistAuthSession();
+  }
+
+  if (playback) {
+    persistPlaybackState();
+  }
+
+  if (settings) {
+    persistSettings();
+  }
+
+  if (layout) {
+    persistLayout();
+  }
+
+  if (renderStatusOnly) {
+    renderStatus();
+    return;
+  }
+
+  if (renderApp) {
+    render();
+  }
+}
+
+function createPluginRuntime() {
+  return {
+    version: "2",
+    window,
+    document,
+    localStorage,
+    sessionStorage,
+    desktop: window.apolloDesktop || null,
+    state,
+    playbackState,
+    likedTracks,
+    caches: {
+      durationCache,
+      playbackUrlCache,
+      pendingDurationKeys
+    },
+    dom: {
+      workspace,
+      sidebarPanel,
+      trackPanel,
+      detailPanel,
+      playlistList,
+      trackList,
+      searchInput,
+      nowPlaying,
+      serverStatus,
+      audioPlayer
+    },
+    helpers: {
+      escapeHtml,
+      formatDuration,
+      providerLabel,
+      withAccessToken,
+      buildTrackKey,
+      serialiseTrack,
+      normaliseLibraryTrack,
+      normaliseRemoteTrack,
+      buildPlaybackPayload,
+      buildDownloadPayload,
+      buildSearchRequestPath,
+      dedupeTracks,
+      clampNumber,
+      clampWidth
+    },
+    snapshots: {
+      getState: createPluginStateSnapshot,
+      getPlayback: createPluginPlaybackSnapshot
+    },
+    queries: {
+      getVisibleTracks,
+      getSelectedTrack,
+      getTrackByKey,
+      getPlaybackTrack,
+      getPlaybackTrackKey: () => state.playbackTrackKey,
+      getPlaylistItems,
+      getPlaylists: () => state.playlists,
+      getActivePlaylist,
+      getEditablePlaylist,
+      isTrackLiked,
+      isTrackInPlaylist,
+      getEnabledProviders,
+      getCachedDuration,
+      canSaveTrackToApollo,
+      getPlugins: () => pluginHost?.getPlugins() || []
+    },
+    net: {
+      getApiBase: () => state.apiBase,
+      requestJson,
+      fetch: (...args) => fetch(...args),
+      withAccessToken,
+      getAuthorizationHeader
+    },
+    ui: {
+      render,
+      renderStatus,
+      renderPlayback,
+      renderDetailPanel,
+      setStatusMessage,
+      setActiveDetailTab,
+      togglePanel,
+      resetLayout,
+      openPlaylistModal,
+      closePlaylistModal,
+      openSettingsModal,
+      closeSettingsModal,
+      commit: commitPluginChanges
+    },
+    search: {
+      getQuery: () => state.query,
+      setQuery,
+      runSearch,
+      fetchSearchResults
+    },
+    library: {
+      refreshLibrary,
+      fetchAllTracks,
+      queueDurationProbe,
+      toggleLike,
+      downloadTrackToDevice,
+      downloadTrackToServer
+    },
+    playlists: {
+      createPlaylist,
+      updatePlaylist,
+      deletePlaylist,
+      uploadPlaylistArtwork,
+      deletePlaylistArtwork,
+      addTrackToPlaylist,
+      removeTrackFromPlaylist
+    },
+    playback: {
+      audioPlayer,
+      selectTrack,
+      playSelectedTrack,
+      playTrack,
+      playAdjacent,
+      resolvePlaybackUrl,
+      waitForPlaybackReady,
+      getSnapshot: createPluginPlaybackSnapshot
+    },
+    auth: {
+      getSession: () => ({ ...state.auth }),
+      refreshAuthStatus,
+      signInWithSecret,
+      signOut,
+      clearAuthSession,
+      persistAuthSession
+    },
+    events: {
+      on: (eventName, handler) => pluginHost?.on(eventName, handler),
+      emit: (eventName, payload) => pluginHost?.emit(eventName, payload)
+    }
   };
 }
 
@@ -1010,6 +1330,15 @@ function getEditablePlaylist(playlistId = state.selectedPlaylistId) {
   return state.playlists.find((playlist) => playlist.id === playlistId) || null;
 }
 
+function isTrackInPlaylist(playlistId, track) {
+  if (!playlistId || !track?.trackId) {
+    return false;
+  }
+
+  const playlist = getEditablePlaylist(playlistId);
+  return Boolean(playlist?.tracks.some((entry) => entry.trackId === track.trackId));
+}
+
 function getEnabledProviders() {
   return searchProviderOrder.filter((provider) => state.settings.search.providers[provider]);
 }
@@ -1032,6 +1361,80 @@ function canSaveTrackToApollo(track) {
   return Boolean(track && track.resultSource !== "library");
 }
 
+function getDiscordPresenceBridge() {
+  return window.apolloDesktop?.discordPresence || null;
+}
+
+function getDiscordPresenceConfig() {
+  return {
+    enabled: state.settings.integrations.discord.enabled,
+    clientId: state.settings.integrations.discord.clientId,
+    largeImageKey: state.settings.integrations.discord.largeImageKey,
+    largeImageText: state.settings.integrations.discord.largeImageText,
+    smallImageKeyPlaying: state.settings.integrations.discord.smallImageKeyPlaying,
+    smallImageKeyPaused: state.settings.integrations.discord.smallImageKeyPaused,
+    smallImageKeyBuffering: state.settings.integrations.discord.smallImageKeyBuffering
+  };
+}
+
+function buildDiscordPlaybackPayload() {
+  const currentTrack = getPlaybackTrack();
+  if (!currentTrack) {
+    return null;
+  }
+
+  const resolvedDuration = audioPlayer.duration || getCachedDuration(currentTrack) || 0;
+  const status = state.isBuffering
+    ? "buffering"
+    : state.isPlaying && !audioPlayer.paused
+      ? "playing"
+      : "paused";
+
+  return {
+    title: currentTrack.title,
+    artist: currentTrack.artist,
+    album: currentTrack.album,
+    provider: providerLabel(currentTrack.provider),
+    status,
+    currentTime: audioPlayer.currentTime || 0,
+    duration: resolvedDuration,
+    playbackRate: audioPlayer.playbackRate || 1
+  };
+}
+
+async function syncDiscordPresenceConfig() {
+  const bridge = getDiscordPresenceBridge();
+  if (!bridge?.available) {
+    return;
+  }
+
+  try {
+    await bridge.configure(getDiscordPresenceConfig());
+  } catch {
+    // Ignore desktop bridge failures so playback continues normally.
+  }
+}
+
+function syncDiscordPresence() {
+  const bridge = getDiscordPresenceBridge();
+  if (!bridge?.available) {
+    return;
+  }
+
+  if (!state.settings.integrations.discord.enabled) {
+    bridge.clear();
+    return;
+  }
+
+  const payload = buildDiscordPlaybackPayload();
+  if (!payload) {
+    bridge.clear();
+    return;
+  }
+
+  bridge.updatePlayback(payload);
+}
+
 function applySettings() {
   audioPlayer.preload = state.settings.audio.preloadMode;
   audioPlayer.volume = state.settings.audio.volume;
@@ -1039,6 +1442,8 @@ function applySettings() {
   audioPlayer.playbackRate = state.settings.playback.playbackRate;
   volumeSlider.value = String(state.settings.audio.volume);
   volumeSlider.step = String(state.settings.audio.volumeStep);
+  void syncDiscordPresenceConfig();
+  syncDiscordPresence();
 }
 
 function populateSettingsForm() {
@@ -1058,6 +1463,13 @@ function populateSettingsForm() {
   settingsProviderSoundcloud.checked = state.settings.search.providers.soundcloud;
   settingsSearchDelay.value = String(state.settings.search.liveSearchDelayMs);
   settingsAutoRefreshLibrary.checked = state.settings.downloads.autoRefreshLibrary;
+  settingsDiscordEnabled.checked = state.settings.integrations.discord.enabled;
+  settingsDiscordClientId.value = state.settings.integrations.discord.clientId;
+  settingsDiscordLargeImageKey.value = state.settings.integrations.discord.largeImageKey;
+  settingsDiscordLargeImageText.value = state.settings.integrations.discord.largeImageText;
+  settingsDiscordSmallImagePlaying.value = state.settings.integrations.discord.smallImageKeyPlaying;
+  settingsDiscordSmallImagePaused.value = state.settings.integrations.discord.smallImageKeyPaused;
+  settingsDiscordSmallImageBuffering.value = state.settings.integrations.discord.smallImageKeyBuffering;
   settingsFormMessage.textContent = "";
 }
 
@@ -1094,6 +1506,17 @@ function saveCurrentSettingsForm() {
     },
     downloads: {
       autoRefreshLibrary: settingsAutoRefreshLibrary.checked
+    },
+    integrations: {
+      discord: {
+        enabled: settingsDiscordEnabled.checked,
+        clientId: settingsDiscordClientId.value,
+        largeImageKey: settingsDiscordLargeImageKey.value,
+        largeImageText: settingsDiscordLargeImageText.value,
+        smallImageKeyPlaying: settingsDiscordSmallImagePlaying.value,
+        smallImageKeyPaused: settingsDiscordSmallImagePaused.value,
+        smallImageKeyBuffering: settingsDiscordSmallImageBuffering.value
+      }
     }
   });
 }
@@ -1121,7 +1544,14 @@ function saveVolumeSetting() {
 function closeActiveMenu() {
   state.activeMenuTrackKey = null;
   state.activeMenuAnchor = null;
+  state.activePlaylistMenuId = null;
+  state.activePlaylistMenuAnchor = null;
   document.querySelectorAll(".track-menu-popover--portal").forEach((menu) => menu.remove());
+  document.querySelectorAll(".playlist-menu-popover--portal").forEach((menu) => menu.remove());
+}
+
+function hasActiveMenu() {
+  return Boolean(state.activeMenuTrackKey || state.activePlaylistMenuId);
 }
 
 function selectTrack(trackKey, { autoplay = false } = {}) {
@@ -1129,6 +1559,10 @@ function selectTrack(trackKey, { autoplay = false } = {}) {
   closeActiveMenu();
   persistPlaybackState();
   render();
+  pluginHost?.emit("selection:changed", {
+    track: getSelectedTrack(),
+    autoplay
+  });
 
   if (autoplay) {
     void playSelectedTrack();
@@ -1139,6 +1573,9 @@ async function refreshLibrary() {
   state.isLoading = true;
   state.message = "Loading library...";
   render();
+  pluginHost?.emit("library:refresh:start", {
+    query: state.query
+  });
 
   try {
     const [health, tracks, playlistsPayload] = await Promise.all([
@@ -1175,6 +1612,11 @@ async function refreshLibrary() {
       syncSelectedTrack();
       persistPlaybackState();
     }
+
+    pluginHost?.emit("library:refresh:success", {
+      tracks: state.libraryTracks,
+      playlists: state.playlists
+    });
   } catch (error) {
     state.isConnected = false;
     if (error.code === "AUTH_REQUIRED") {
@@ -1185,9 +1627,14 @@ async function refreshLibrary() {
       state.selectedTrackKey = null;
       state.message = `Apollo unavailable at ${state.apiBase}. ${error.message}`;
     }
+
+    pluginHost?.emit("library:refresh:error", {
+      error
+    });
   } finally {
     state.isLoading = false;
     render();
+    syncDiscordPresence();
   }
 }
 
@@ -1197,12 +1644,16 @@ async function runSearch() {
     state.message = state.isConnected ? "" : state.message;
     syncSelectedTrack();
     render();
+    pluginHost?.emit("search:cleared", {});
     return;
   }
 
   state.isLoading = true;
   state.message = "Searching library and providers...";
   render();
+  pluginHost?.emit("search:start", {
+    query: state.query
+  });
 
   try {
     const { tracks, warnings } = await fetchSearchResults(state.query);
@@ -1212,9 +1663,18 @@ async function runSearch() {
     const summary = `${libraryCount} library | ${remoteCount} remote`;
     state.message = warnings.length ? `${summary} | ${warnings.join(" ")}` : summary;
     syncSelectedTrack();
+    pluginHost?.emit("search:success", {
+      query: state.query,
+      tracks,
+      warnings
+    });
   } catch (error) {
     state.searchResults = [];
     state.message = error.message;
+    pluginHost?.emit("search:error", {
+      query: state.query,
+      error
+    });
   } finally {
     state.isLoading = false;
     render();
@@ -1247,6 +1707,10 @@ function toggleLike(track) {
   }
 
   render();
+  pluginHost?.emit("library:like-changed", {
+    track,
+    liked: likedTracks.has(track.key)
+  });
 }
 
 async function copyTrackLink(track) {
@@ -1517,6 +1981,7 @@ async function downloadTrackToServer(track) {
 
 function renderPlaylists() {
   const items = getPlaylistItems();
+  document.querySelectorAll(".playlist-menu-popover--portal").forEach((menu) => menu.remove());
   playlistList.innerHTML = "";
 
   items.forEach((playlist) => {
@@ -1524,18 +1989,25 @@ function renderPlaylists() {
     const artworkMarkup = playlistRecord?.artworkUrl
       ? `<img class="item-art-image" src="${escapeHtml(withAccessToken(playlistRecord.artworkUrl))}" alt="">`
       : noteIcon();
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `library-item${playlist.id === state.selectedPlaylistId && !state.query ? " is-active" : ""}`;
-    button.innerHTML = `
-      <span class="item-art">${artworkMarkup}</span>
-      <span class="item-copy">
-        <p class="item-title">${escapeHtml(playlist.name)}</p>
-        <p class="item-subtitle">${escapeHtml(playlist.detail)}</p>
-      </span>
+    const isEditable = Boolean(playlistRecord);
+    const row = document.createElement("div");
+    row.className = `library-item${playlist.id === state.selectedPlaylistId && !state.query ? " is-active" : ""}`;
+    row.innerHTML = `
+      <button class="library-item-main" type="button">
+        <span class="item-art">${artworkMarkup}</span>
+        <span class="item-copy">
+          <p class="item-title">${escapeHtml(playlist.name)}</p>
+          <p class="item-subtitle">${escapeHtml(playlist.detail)}</p>
+        </span>
+      </button>
+      ${
+        isEditable
+          ? `<button class="library-item-menu" type="button" aria-label="Playlist actions">${dotsIcon()}</button>`
+          : '<span class="library-item-menu-spacer" aria-hidden="true"></span>'
+      }
     `;
 
-    button.addEventListener("click", () => {
+    row.querySelector(".library-item-main").addEventListener("click", () => {
       state.selectedPlaylistId = playlist.id;
       state.query = "";
       state.searchResults = [];
@@ -1546,7 +2018,44 @@ function renderPlaylists() {
       render();
     });
 
-    playlistList.append(button);
+    if (isEditable) {
+      const menuButton = row.querySelector(".library-item-menu");
+      menuButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        const rect = menuButton.getBoundingClientRect();
+        const shouldOpen = state.activePlaylistMenuId !== playlist.id;
+        closeActiveMenu();
+        state.activePlaylistMenuId = shouldOpen ? playlist.id : null;
+        state.activePlaylistMenuAnchor = shouldOpen
+          ? {
+              x: rect.right,
+              y: rect.bottom
+            }
+          : null;
+        renderPlaylists();
+      });
+
+      row.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        closeActiveMenu();
+        state.activePlaylistMenuId = playlist.id;
+        state.activePlaylistMenuAnchor = {
+          x: event.clientX,
+          y: event.clientY
+        };
+        renderPlaylists();
+      });
+
+      if (state.activePlaylistMenuId === playlist.id) {
+        const menu = createPlaylistMenu(playlistRecord);
+        menu.classList.add("playlist-menu-popover--portal");
+        document.body.append(menu);
+        positionActiveMenu(row, menu, state.activePlaylistMenuAnchor);
+      }
+    }
+
+    playlistList.append(row);
   });
 }
 
@@ -1554,19 +2063,17 @@ function createRowMenu(track) {
   const isLiked = isTrackLiked(track.key);
   const isLibraryTrack = Boolean(track.trackId);
   const isRemoteTrack = !isLibraryTrack;
-  const inUserPlaylist =
-    !state.query &&
-    state.selectedPlaylistId !== "all-tracks" &&
-    state.selectedPlaylistId !== "liked-tracks";
+  const editablePlaylist = getEditablePlaylist();
+  const canToggleCurrentPlaylist = Boolean(editablePlaylist && isLibraryTrack);
+  const isInCurrentPlaylist = canToggleCurrentPlaylist ? isTrackInPlaylist(editablePlaylist.id, track) : false;
 
   const wrapper = document.createElement("div");
   wrapper.className = "track-menu-popover";
   wrapper.innerHTML = `
     <button class="row-menu-button" type="button" data-action="play">Play now</button>
     <button class="row-menu-button" type="button" data-action="like">${isLiked ? "Remove like" : "Like track"}</button>
-    ${isLibraryTrack ? '<button class="row-menu-button" type="button" data-action="add-current">Add to current playlist</button>' : ""}
+    ${canToggleCurrentPlaylist ? `<button class="row-menu-button" type="button" data-action="toggle-current">${isInCurrentPlaylist ? "Remove from playlist" : "Add to playlist"}</button>` : ""}
     <button class="row-menu-button" type="button" data-action="create-playlist">${isLibraryTrack ? "Create playlist with track" : "Create playlist"}</button>
-    ${inUserPlaylist && isLibraryTrack ? '<button class="row-menu-button" type="button" data-action="remove">Remove from playlist</button>' : ""}
     ${isRemoteTrack ? '<button class="row-menu-button" type="button" data-action="download-server">Save to Apollo</button>' : ""}
     <button class="row-menu-button" type="button" data-action="download-client">Download</button>
     <button class="row-menu-button" type="button" data-action="copy">Copy link</button>
@@ -1583,18 +2090,15 @@ function createRowMenu(track) {
     render();
   });
 
-  const addCurrent = wrapper.querySelector('[data-action="add-current"]');
-  if (addCurrent) {
-    addCurrent.addEventListener("click", async () => {
+  const toggleCurrent = wrapper.querySelector('[data-action="toggle-current"]');
+  if (toggleCurrent && editablePlaylist) {
+    toggleCurrent.addEventListener("click", async () => {
       closeActiveMenu();
-
-      if (!inUserPlaylist) {
-        state.message = "Select a playlist first, then add the track.";
-        render();
+      if (isInCurrentPlaylist) {
+        await removeTrackFromPlaylist(editablePlaylist.id, track);
         return;
       }
-
-      await addTrackToPlaylist(state.selectedPlaylistId, track);
+      await addTrackToPlaylist(editablePlaylist.id, track);
     });
   }
 
@@ -1605,14 +2109,6 @@ function createRowMenu(track) {
       initialTrackId: isLibraryTrack ? track.trackId : null
     });
   });
-
-  const removeButton = wrapper.querySelector('[data-action="remove"]');
-  if (removeButton) {
-    removeButton.addEventListener("click", async () => {
-      closeActiveMenu();
-      await removeTrackFromPlaylist(state.selectedPlaylistId, track);
-    });
-  }
 
   const downloadServerButton = wrapper.querySelector('[data-action="download-server"]');
   if (downloadServerButton) {
@@ -1638,13 +2134,44 @@ function createRowMenu(track) {
   return wrapper;
 }
 
-function positionActiveMenu(row, menu) {
+function createPlaylistMenu(playlist) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "track-menu-popover playlist-menu-popover";
+  wrapper.innerHTML = `
+    <button class="row-menu-button" type="button" data-action="open">Open playlist</button>
+    <button class="row-menu-button" type="button" data-action="edit">Edit playlist</button>
+  `;
+
+  wrapper.querySelector('[data-action="open"]').addEventListener("click", () => {
+    state.selectedPlaylistId = playlist.id;
+    state.query = "";
+    state.searchResults = [];
+    searchInput.value = "";
+    closeActiveMenu();
+    syncSelectedTrack();
+    persistPlaybackState();
+    render();
+  });
+
+  wrapper.querySelector('[data-action="edit"]').addEventListener("click", () => {
+    closeActiveMenu();
+    openPlaylistModal({
+      mode: "edit",
+      playlistId: playlist.id,
+      title: "Edit playlist"
+    });
+  });
+
+  return wrapper;
+}
+
+function positionActiveMenu(row, menu, anchorOverride = null) {
   const viewportPadding = 12;
   const fallbackRect = row.getBoundingClientRect();
-  const anchor = state.activeMenuAnchor || {
-    x: fallbackRect.right - 12,
-    y: fallbackRect.top + 56
-  };
+  const anchor = anchorOverride || state.activeMenuAnchor || state.activePlaylistMenuAnchor || {
+      x: fallbackRect.right - 12,
+      y: fallbackRect.top + 56
+    };
 
   menu.style.left = "0";
   menu.style.top = "0";
@@ -1707,8 +2234,10 @@ function renderTracks() {
     menuButton.addEventListener("click", (event) => {
       event.stopPropagation();
       const rect = menuButton.getBoundingClientRect();
-      state.activeMenuTrackKey = state.activeMenuTrackKey === track.key ? null : track.key;
-      state.activeMenuAnchor = state.activeMenuTrackKey
+      const shouldOpen = state.activeMenuTrackKey !== track.key;
+      closeActiveMenu();
+      state.activeMenuTrackKey = shouldOpen ? track.key : null;
+      state.activeMenuAnchor = shouldOpen
         ? {
             x: rect.right,
             y: rect.bottom
@@ -1720,6 +2249,7 @@ function renderTracks() {
     row.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       event.stopPropagation();
+      closeActiveMenu();
       state.activeMenuTrackKey = track.key;
       state.activeMenuAnchor = {
         x: event.clientX,
@@ -1778,6 +2308,9 @@ function renderDetailPanel() {
   const playbackTrack = getPlaybackTrack();
   const activeTrack = playbackTrack || selectedTrack;
   const liked = activeTrack ? isTrackLiked(activeTrack.key) : false;
+  const editablePlaylist = activeTrack ? getEditablePlaylist() : null;
+  const canToggleCurrentPlaylist = Boolean(editablePlaylist && activeTrack?.trackId);
+  const isInCurrentPlaylist = canToggleCurrentPlaylist ? isTrackInPlaylist(editablePlaylist.id, activeTrack) : false;
   const tabs = [
     {
       id: "track",
@@ -1820,9 +2353,7 @@ function renderDetailPanel() {
         return;
       }
 
-      state.activeDetailTab = nextTab;
-      persistPlaybackState();
-      renderDetailPanel();
+      setActiveDetailTab(nextTab);
     });
   });
 
@@ -1870,6 +2401,7 @@ function renderDetailPanel() {
     <div class="detail-actions">
       <button class="detail-action" type="button" data-detail-action="play">Play</button>
       <button class="detail-action" type="button" data-detail-action="like">${liked ? "Unlike" : "Like"}</button>
+      ${canToggleCurrentPlaylist ? `<button class="detail-action" type="button" data-detail-action="toggle-playlist">${isInCurrentPlaylist ? "Remove from playlist" : "Add to playlist"}</button>` : ""}
       ${activeTrack.resultSource !== "library" ? '<button class="detail-action" type="button" data-detail-action="download-server">Save to Apollo</button>' : ""}
       <button class="detail-action" type="button" data-detail-action="download-client">Download</button>
       <button class="detail-action" type="button" data-detail-action="copy">Copy link</button>
@@ -1886,6 +2418,17 @@ function renderDetailPanel() {
   panelBody.querySelector('[data-detail-action="like"]').addEventListener("click", () => {
     toggleLike(activeTrack);
   });
+
+  const playlistToggleButton = panelBody.querySelector('[data-detail-action="toggle-playlist"]');
+  if (playlistToggleButton && editablePlaylist) {
+    playlistToggleButton.addEventListener("click", async () => {
+      if (isInCurrentPlaylist) {
+        await removeTrackFromPlaylist(editablePlaylist.id, activeTrack);
+        return;
+      }
+      await addTrackToPlaylist(editablePlaylist.id, activeTrack);
+    });
+  }
 
   const saveToServerButton = panelBody.querySelector('[data-detail-action="download-server"]');
   if (saveToServerButton) {
@@ -2036,6 +2579,10 @@ function render() {
   renderNowPlaying();
   renderStatus();
   renderPlayback();
+  pluginHost?.emit("app:render", {
+    state: createPluginStateSnapshot(),
+    playback: createPluginPlaybackSnapshot()
+  });
 }
 
 function waitForPlaybackReady() {
@@ -2108,6 +2655,10 @@ async function playSelectedTrack() {
       audioPlayer.load();
       state.playbackTrackKey = selectedTrack.key;
       persistPlaybackState();
+      pluginHost?.emit("playback:track-changed", {
+        track: selectedTrack,
+        playback: createPluginPlaybackSnapshot()
+      });
       await waitForPlaybackReady();
     }
 
@@ -2117,6 +2668,10 @@ async function playSelectedTrack() {
     state.isPlaying = false;
     state.isBuffering = false;
     state.message = error.message;
+    pluginHost?.emit("playback:error", {
+      track: selectedTrack,
+      error
+    });
     render();
   }
 }
@@ -2232,28 +2787,46 @@ function endResize() {
 }
 
 document.addEventListener("click", (event) => {
-  if (!event.target.closest(".track-menu-popover") && !event.target.closest(".track-row")) {
+  if (!hasActiveMenu()) {
+    return;
+  }
+
+  if (
+    !event.target.closest(".track-menu-popover") &&
+    !event.target.closest(".playlist-menu-popover") &&
+    !event.target.closest(".track-menu-button") &&
+    !event.target.closest(".library-item-menu")
+  ) {
     closeActiveMenu();
-    renderTracks();
+    render();
   }
 });
 
 trackList.addEventListener("scroll", () => {
-  if (!state.activeMenuTrackKey) {
+  if (!hasActiveMenu()) {
     return;
   }
 
   closeActiveMenu();
-  renderTracks();
+  render();
+});
+
+playlistList.addEventListener("scroll", () => {
+  if (!hasActiveMenu()) {
+    return;
+  }
+
+  closeActiveMenu();
+  render();
 });
 
 window.addEventListener("resize", () => {
-  if (!state.activeMenuTrackKey) {
+  if (!hasActiveMenu()) {
     return;
   }
 
   closeActiveMenu();
-  renderTracks();
+  render();
 });
 
 resizers.forEach((resizer) => {
@@ -2307,6 +2880,9 @@ playlistModalClose.addEventListener("click", closePlaylistModal);
 playlistFormCancel.addEventListener("click", closePlaylistModal);
 settingsModalClose.addEventListener("click", closeSettingsModal);
 settingsFormCancel.addEventListener("click", closeSettingsModal);
+playlistArtworkChoose.addEventListener("click", () => {
+  playlistArtworkInput.click();
+});
 
 playlistModal.querySelectorAll("[data-modal-close]").forEach((element) => {
   element.addEventListener("click", closePlaylistModal);
@@ -2556,11 +3132,15 @@ volumeButton.addEventListener("click", () => {
 audioPlayer.addEventListener("loadstart", () => {
   state.isBuffering = true;
   renderPlayback();
+  syncDiscordPresence();
+  pluginHost?.emit("playback:state", createPluginPlaybackSnapshot());
 });
 
 audioPlayer.addEventListener("waiting", () => {
   state.isBuffering = true;
   renderPlayback();
+  syncDiscordPresence();
+  pluginHost?.emit("playback:state", createPluginPlaybackSnapshot());
 });
 
 audioPlayer.addEventListener("play", () => {
@@ -2568,6 +3148,8 @@ audioPlayer.addEventListener("play", () => {
   state.isBuffering = false;
   state.message = "";
   render();
+  syncDiscordPresence();
+  pluginHost?.emit("playback:state", createPluginPlaybackSnapshot());
 });
 
 audioPlayer.addEventListener("pause", () => {
@@ -2576,6 +3158,8 @@ audioPlayer.addEventListener("pause", () => {
     state.isBuffering = false;
   }
   renderPlayback();
+  syncDiscordPresence();
+  pluginHost?.emit("playback:state", createPluginPlaybackSnapshot());
 });
 
 audioPlayer.addEventListener("timeupdate", renderPlayback);
@@ -2591,6 +3175,8 @@ audioPlayer.addEventListener("loadedmetadata", () => {
     state.restoredPlaybackKey = null;
   }
   render();
+  syncDiscordPresence();
+  pluginHost?.emit("playback:metadata", createPluginPlaybackSnapshot());
 });
 
 audioPlayer.addEventListener("ended", () => {
@@ -2616,6 +3202,8 @@ audioPlayer.addEventListener("ended", () => {
   }
 
   renderPlayback();
+  syncDiscordPresence();
+  pluginHost?.emit("playback:state", createPluginPlaybackSnapshot());
 });
 
 window.addEventListener("focus", () => {
@@ -2636,6 +3224,8 @@ window.addEventListener("blur", () => {
 audioPlayer.addEventListener("ratechange", () => {
   state.settings.playback.playbackRate = audioPlayer.playbackRate;
   persistSettings();
+  syncDiscordPresence();
+  pluginHost?.emit("playback:state", createPluginPlaybackSnapshot());
 });
 
 audioPlayer.addEventListener("timeupdate", () => {
@@ -2643,9 +3233,23 @@ audioPlayer.addEventListener("timeupdate", () => {
   persistPlaybackState();
 });
 
+audioPlayer.addEventListener("seeked", syncDiscordPresence);
+audioPlayer.addEventListener("emptied", syncDiscordPresence);
+
+pluginHost = createPluginHost({
+  escapeHtml,
+  formatDuration,
+  providerLabel,
+  apollo: createPluginRuntime()
+});
+
 await pluginHost.loadPlugins(builtinPlugins);
 applySettings();
 render();
+
+window.addEventListener("beforeunload", () => {
+  pluginHost?.dispose();
+});
 
 async function initialiseApolloClient() {
   try {
@@ -2658,6 +3262,11 @@ async function initialiseApolloClient() {
     state.message = error.message;
     render();
   }
+
+  pluginHost?.emit("app:ready", {
+    state: createPluginStateSnapshot(),
+    playback: createPluginPlaybackSnapshot()
+  });
 }
 
 await initialiseApolloClient();

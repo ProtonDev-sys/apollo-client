@@ -1,34 +1,38 @@
 # Plugin Development
 
-Apollo Client exposes a small renderer-side plugin host for extending the detail panel and lyrics resolution flow.
+Apollo Client plugins are trusted renderer modules. They are not sandboxed and can reach most of the client runtime through `api.apollo`.
 
 ## Scope
 
-Plugins currently support two extension points:
+Plugins can now:
 
-- detail panel tabs
-- lyrics providers
+- add detail tabs
+- register lyrics providers
+- read and mutate live app state
+- drive playback, search, playlists, auth, and layout flows
+- call Apollo API endpoints through the client request helpers
+- subscribe to app lifecycle and playback events
+- access the DOM, browser APIs, and the desktop bridge already exposed in preload
 
-The system is intentionally small. There is no runtime marketplace, no external plugin directory, and no renderer sandbox for third-party code yet.
+Plugins are currently loaded as built-in modules from `src/plugins/index.js`. There is no external marketplace or sandbox.
 
 ## Architecture
 
 - Plugins are plain ES modules loaded by the renderer.
-- Built-in plugins are registered in `src/plugins/index.js`.
 - The host lives in `src/plugin-host.js`.
-- Plugins are loaded during renderer startup before the first render.
+- The renderer builds the broad runtime surface in `src/renderer.js`.
+- Built-in plugins are registered in `src/plugins/index.js`.
 
-## Plugin module shape
+## Plugin Module Shape
 
-Each plugin exports a default object with:
+Each plugin exports a default object:
 
 ```js
 const plugin = {
   id: "example",
   name: "Example Plugin",
   async setup(api) {
-    // registerDetailTab(...)
-    // registerLyricsProvider(...)
+    // plugin bootstrap
   }
 };
 
@@ -37,66 +41,252 @@ export default plugin;
 
 Requirements:
 
-- `id` must be unique.
-- `setup(api)` is required.
-- `name` is optional and is used for display/debugging only.
+- `id` is required and unique
+- `setup(api)` is required
+- `name` is optional
+
+`setup(api)` may return a cleanup function. The host runs it when the renderer unloads.
 
 ## Setup API
 
-Inside `setup(api)`, the plugin receives:
+The setup API includes:
 
 - `registerDetailTab(tab)`
 - `registerLyricsProvider(provider)`
+- `on(eventName, handler)`
+- `emit(eventName, payload)`
+- `onDispose(cleanup)`
 - `escapeHtml(value)`
 - `formatDuration(value)`
 - `providerLabel(providerId)`
+- `apollo`
 
-The shared helper functions come from the renderer host and keep plugin output consistent with the rest of the client.
+`api.apollo` is the main plugin runtime.
 
-## Detail tabs
+## The `apollo` Runtime
 
-Use `registerDetailTab` to add a tab to the right-hand detail panel.
+The runtime exposes:
+
+- `apollo.state`
+- `apollo.playbackState`
+- `apollo.likedTracks`
+- `apollo.caches`
+- `apollo.window`
+- `apollo.document`
+- `apollo.localStorage`
+- `apollo.sessionStorage`
+- `apollo.desktop`
+- `apollo.dom`
+- `apollo.helpers`
+- `apollo.snapshots`
+- `apollo.queries`
+- `apollo.net`
+- `apollo.ui`
+- `apollo.search`
+- `apollo.library`
+- `apollo.playlists`
+- `apollo.playback`
+- `apollo.auth`
+- `apollo.events`
+
+Notes:
+
+- `apollo.state` is the live renderer state object
+- direct state mutation requires explicit persistence and rendering
+- `apollo.ui.commit(...)` handles persistence and render triggers
+- `apollo.window` and `apollo.document` are exposed because plugins already run in the renderer
+
+## Runtime Highlights
+
+Commonly used sections:
+
+### `apollo.queries`
+
+- `getVisibleTracks()`
+- `getSelectedTrack()`
+- `getTrackByKey(trackKey)`
+- `getPlaybackTrack()`
+- `getPlaybackTrackKey()`
+- `getPlaylistItems()`
+- `getPlaylists()`
+- `getActivePlaylist()`
+- `getEditablePlaylist()`
+- `isTrackLiked(trackKey)`
+- `isTrackInPlaylist(playlistId, track)`
+- `getEnabledProviders()`
+- `getCachedDuration(track)`
+- `canSaveTrackToApollo(track)`
+- `getPlugins()`
+
+### `apollo.net`
+
+- `getApiBase()`
+- `requestJson(path, options)`
+- `fetch(...)`
+- `withAccessToken(url)`
+- `getAuthorizationHeader()`
+
+### `apollo.ui`
+
+- `render()`
+- `renderStatus()`
+- `renderPlayback()`
+- `renderDetailPanel()`
+- `setStatusMessage(message)`
+- `setActiveDetailTab(tabId, options)`
+- `togglePanel(panelId)`
+- `resetLayout()`
+- `openPlaylistModal(options)`
+- `closePlaylistModal()`
+- `openSettingsModal()`
+- `closeSettingsModal()`
+- `commit(options)`
+
+`commit(options)` supports:
+
+- `likes: true`
+- `auth: true`
+- `playback: true`
+- `settings: true`
+- `layout: true`
+- `renderApp: true`
+- `renderStatusOnly: true`
+
+### `apollo.search`
+
+- `getQuery()`
+- `setQuery(query, options)`
+- `runSearch()`
+- `fetchSearchResults(query)`
+
+### `apollo.library`
+
+- `refreshLibrary()`
+- `fetchAllTracks(query)`
+- `queueDurationProbe(track)`
+- `toggleLike(track)`
+- `downloadTrackToDevice(track)`
+- `downloadTrackToServer(track)`
+
+### `apollo.playlists`
+
+- `createPlaylist(name, description, initialTrackId)`
+- `updatePlaylist(playlistId, name, description)`
+- `deletePlaylist(playlistId)`
+- `uploadPlaylistArtwork(playlistId, file)`
+- `deletePlaylistArtwork(playlistId)`
+- `addTrackToPlaylist(playlistId, track)`
+- `removeTrackFromPlaylist(playlistId, track)`
+
+### `apollo.playback`
+
+- `audioPlayer`
+- `selectTrack(trackKey, options)`
+- `playSelectedTrack()`
+- `playTrack(trackOrKey, options)`
+- `playAdjacent(offset, wrap)`
+- `resolvePlaybackUrl(track)`
+- `waitForPlaybackReady()`
+- `getSnapshot()`
+
+### `apollo.auth`
+
+- `getSession()`
+- `refreshAuthStatus()`
+- `signInWithSecret(secret)`
+- `signOut()`
+- `clearAuthSession()`
+- `persistAuthSession()`
+
+## Events
+
+Plugins can subscribe through:
+
+- `api.on("event:name", handler)`
+- `api.apollo.events.on("event:name", handler)`
+
+Current host events include:
+
+- `plugins:loaded`
+- `app:render`
+- `app:ready`
+- `selection:changed`
+- `detail:tab-change`
+- `library:refresh:start`
+- `library:refresh:success`
+- `library:refresh:error`
+- `library:like-changed`
+- `search:start`
+- `search:success`
+- `search:error`
+- `search:cleared`
+- `playback:track-changed`
+- `playback:state`
+- `playback:metadata`
+- `playback:error`
+- `auth:changed`
+
+Plugins may also emit custom events through `emit(...)`.
+
+## Detail Tabs
+
+`registerDetailTab` adds a tab to the right-hand detail panel.
 
 ```js
 api.registerDetailTab({
-  id: "credits",
-  label: "Credits",
-  order: 40,
-  mount({ container, context, services }) {
-    const track = context.getSelectedTrack() || context.getPlaybackTrack();
+  id: "queue-tools",
+  label: "Queue Tools",
+  order: 30,
+  mount({ container, context, apollo }) {
+    const track = context.getPlaybackTrack() || context.getSelectedTrack();
 
     container.innerHTML = `
       <div class="detail-empty-state">
-        <h3>Credits</h3>
-        <p>${api.escapeHtml(track?.artist || "No artist selected.")}</p>
+        <h3>Queue Tools</h3>
+        <p>${api.escapeHtml(track?.title || "Nothing selected.")}</p>
+        <button type="button" data-action="like">Toggle like</button>
       </div>
     `;
 
-    return () => {
-      // optional cleanup
-    };
+    container.querySelector("[data-action='like']")?.addEventListener("click", () => {
+      const activeTrack = apollo.queries.getPlaybackTrack() || apollo.queries.getSelectedTrack();
+      if (!activeTrack) {
+        return;
+      }
+
+      apollo.library.toggleLike(activeTrack);
+    });
   }
 });
 ```
 
 Detail tab fields:
 
-- `id`: required unique string.
-- `label`: required tab label.
-- `order`: optional sort order, lower values render earlier.
-- `mount(...)`: required function that renders into the provided container.
+- `id`: required unique string
+- `label`: required tab label
+- `order`: optional sort order
+- `mount(...)`: required render function
 
-`mount` receives:
+`mount(...)` receives:
 
-- `container`: DOM node for the tab body.
-- `context`: detail panel context from the renderer.
-- `services`: plugin-host services exposed at mount time.
+- `container`
+- `context`
+- `apollo`
+- `api`
+- `plugin`
+- `services`
 
-`mount` may return a cleanup function. The host calls it when the tab is replaced or when the detail panel is re-rendered.
+`services` currently provides:
 
-## Detail context
+- `resolveLyrics(track)`
+- `emit(eventName, payload)`
+- `on(eventName, handler)`
 
-The current detail context includes:
+The tab mount may return a cleanup function.
+
+## Detail Context
+
+The detail context currently includes:
 
 - `audioPlayer`
 - `getPlaybackTrack()`
@@ -104,12 +294,11 @@ The current detail context includes:
 - `getSelectedTrack()`
 - `isTrackLiked(trackKey)`
 - `providerLabel(providerId)`
+- `apollo`
 
-Use `getPlaybackTrack()` for the actively playing item and `getSelectedTrack()` for the track currently highlighted in the list.
+## Lyrics Providers
 
-## Lyrics providers
-
-Use `registerLyricsProvider` to participate in lyrics resolution.
+`registerLyricsProvider` participates in lyrics resolution.
 
 ```js
 api.registerLyricsProvider({
@@ -133,58 +322,74 @@ api.registerLyricsProvider({
 
 Lyrics provider fields:
 
-- `id`: required unique string.
-- `name`: required display name.
-- `order`: optional priority, lower values run first.
-- `canResolve(track)`: optional pre-filter.
-- `resolve(track)`: required async resolver.
+- `id`: required unique string
+- `name`: required display name
+- `order`: optional priority, lower runs first
+- `canResolve(track)`: optional pre-filter
+- `resolve(track)`: required async resolver
 
-Resolver return shape:
+Resolver behavior:
+
+- Return `null` to defer to the next provider.
+- Throwing does not stop later providers.
+- If `lines` contains entries, the result is treated as synced lyrics.
+
+## Example: Full-Power Plugin
 
 ```js
-{
-  source: "Provider name",
-  synced: true,
-  plainText: "Full plain-text lyrics",
-  lines: [
-    { startMs: 0, endMs: 4200, text: "First line" }
-  ],
-  meta: {
-    album: "Album title"
+const automationPlugin = {
+  id: "automation-tools",
+  name: "Automation Tools",
+  async setup(api) {
+    api.on("app:ready", () => {
+      api.apollo.ui.setStatusMessage("Automation plugin loaded.");
+    });
+
+    api.registerDetailTab({
+      id: "automation-tools",
+      label: "Automation",
+      order: 50,
+      mount({ container, apollo }) {
+        container.innerHTML = `
+          <div class="detail-empty-state">
+            <h3>Automation</h3>
+            <button type="button" data-action="refresh">Refresh library</button>
+          </div>
+        `;
+
+        const button = container.querySelector("[data-action='refresh']");
+        const onClick = () => {
+          void apollo.library.refreshLibrary();
+        };
+
+        button?.addEventListener("click", onClick);
+
+        return () => {
+          button?.removeEventListener("click", onClick);
+        };
+      }
+    });
   }
-}
+};
+
+export default automationPlugin;
 ```
 
-Resolution behavior:
+## Registering a Plugin
 
-- Returning `null` means "no result, try the next provider".
-- If a provider throws, the host ignores the failure and continues to later providers.
-- If `lines` has data, the host treats the lyrics as synced.
-
-## Registering a plugin
-
-Add the plugin module to `src/plugins/` and include it in `src/plugins/index.js`.
+Add the module under `src/plugins/` and include it in `src/plugins/index.js`.
 
 ```js
 import lyricsPlugin from "./lyrics-plugin.js";
-import creditsPlugin from "./credits-plugin.js";
+import automationPlugin from "./automation-plugin.js";
 
-export const builtinPlugins = [lyricsPlugin, creditsPlugin];
+export const builtinPlugins = [lyricsPlugin, automationPlugin];
 ```
 
-That is the only registration step in the current app.
+## Safety Guidance
 
-## Best practices
-
-- Keep the root README focused on setup and navigation; put plugin implementation detail here.
-- Use fenced code blocks with language identifiers for examples.
-- Prefer relative links when linking to repository files.
-- Avoid embedding secrets, internal endpoints, or local machine paths in examples.
-- Clean up listeners, timers, and observers from `mount` cleanup functions.
-
-## Implementation notes
-
-- Plugins currently run in the renderer, not in the Electron main process.
-- There is no dynamic plugin loading, sandboxing, or external plugin directory yet.
-- Plugins should avoid storing secrets or making assumptions about privileged Node access.
-- If a plugin calls external services, it should do so with public metadata only unless the renderer contract is expanded deliberately.
+- Plugins are trusted code.
+- Plugins can break rendering, playback, auth, or state persistence if they mutate the runtime carelessly.
+- Untrusted plugins should not be used in clients with access to private Apollo servers or valid auth tokens.
+- Prefer `apollo.snapshots` for read-heavy logic and `apollo.ui.commit(...)` after direct state mutation.
+- Clean up listeners, observers, and timers from `mount` and `setup`.

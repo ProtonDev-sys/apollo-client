@@ -137,7 +137,7 @@ function scoreCandidate(candidate, track) {
   return score;
 }
 
-async function fetchLyricsFromLrclib(track) {
+async function fetchLyricsFromLrclib(track, fetchImpl = fetch) {
   if (!track?.title || !track?.artist) {
     return null;
   }
@@ -157,7 +157,7 @@ async function fetchLyricsFromLrclib(track) {
       params.set("album_name", track.album);
     }
 
-    const response = await fetch(`https://lrclib.net/api/search?${params.toString()}`);
+    const response = await fetchImpl(`https://lrclib.net/api/search?${params.toString()}`);
     if (!response.ok) {
       throw new Error("Lyrics lookup failed.");
     }
@@ -327,6 +327,8 @@ const lyricsPlugin = {
   id: "lyrics",
   name: "Lyrics",
   async setup(api) {
+    const fetchLyrics = (track) => fetchLyricsFromLrclib(track, api.apollo?.net?.fetch || fetch);
+
     api.registerLyricsProvider({
       id: "lrclib",
       name: "LRCLIB",
@@ -335,7 +337,7 @@ const lyricsPlugin = {
         return Boolean(track?.title && track?.artist);
       },
       async resolve(track) {
-        return fetchLyricsFromLrclib(track);
+        return fetchLyrics(track);
       }
     });
 

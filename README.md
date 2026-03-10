@@ -1,80 +1,85 @@
 # Apollo Client
 
-Desktop Electron client for the Apollo music server.
+Apollo Client is an Electron desktop app for browsing an Apollo music server, managing playlists, and playing music from a desktop interface.
 
-## Overview
+## Features
 
-Apollo Client is a desktop-first shell that talks directly to an Apollo server and provides:
+- Browse your library and playlists
+- Search the library and supported providers
+- Create, edit, and delete playlists
+- Play tracks with repeat, seek, and volume controls
+- View lyrics through the built-in LRCLIB-powered plugin
+- Extend the client through a broad renderer-side plugin runtime
+- Sign in with Apollo shared-secret authentication when enabled
+- Show optional Discord Rich Presence while listening
 
-- library and playlist browsing
-- track search and playback
-- playlist creation and editing
-- auth/session handling against Apollo's API
-- a renderer-side plugin host for detail-panel extensions
-- a built-in lyrics plugin backed by LRCLIB
-
-## Prerequisites
+## Requirements
 
 - Node.js 20 or newer
 - npm 10 or newer
-- a running Apollo server
+- A running Apollo server
 
-## Setup
+## Quick start
 
 Install dependencies:
 
-```powershell
-npm.cmd install
+```sh
+npm install
 ```
 
-By default the client connects to `http://127.0.0.1:4848`.
+Launch the desktop client:
 
-If Apollo is running somewhere else, set `APOLLO_SERVER_URL` before launch:
+```sh
+npm start
+```
+
+Apollo Client connects to `http://127.0.0.1:4848` by default.
+
+## Configuration
+
+Set `APOLLO_SERVER_URL` before launch when the server is not running on the default address.
+
+PowerShell:
 
 ```powershell
 $env:APOLLO_SERVER_URL = "http://127.0.0.1:4848"
+npm start
 ```
 
-Optional Discord Rich Presence defaults can also be supplied through environment variables:
+Bash:
 
-```powershell
-$env:APOLLO_DISCORD_CLIENT_ID = "your_discord_application_id"
-$env:APOLLO_DISCORD_LARGE_IMAGE_KEY = "apollo"
-$env:APOLLO_DISCORD_LARGE_IMAGE_TEXT = "Apollo Client"
+```bash
+APOLLO_SERVER_URL="http://127.0.0.1:4848" npm start
 ```
 
-You can also configure Rich Presence directly inside Apollo's settings modal. To show artwork or playback-status icons, create a Discord application and upload matching asset keys in the Discord developer portal.
+### Discord Rich Presence
 
-## Run in development
+Discord Rich Presence is optional. Configuration can be supplied in the settings UI or through environment variables:
 
-```powershell
-npm.cmd start
+```text
+APOLLO_DISCORD_CLIENT_ID
+APOLLO_DISCORD_LARGE_IMAGE_KEY
+APOLLO_DISCORD_LARGE_IMAGE_TEXT
+APOLLO_DISCORD_SMALL_IMAGE_KEY_PLAYING
+APOLLO_DISCORD_SMALL_IMAGE_KEY_PAUSED
+APOLLO_DISCORD_SMALL_IMAGE_KEY_BUFFERING
 ```
 
-That starts Electron directly from the checked-out source.
-
-## Build
-
-The project currently ships as source plus an Electron runtime. There is no packaging pipeline or installer script yet.
-
-Current build/run path:
-
-- install dependencies with `npm.cmd install`
-- launch the desktop client with `npm.cmd start`
-
-If you want distributable binaries later, add an Electron packager such as `electron-builder` or `electron-forge` and introduce explicit build scripts in `package.json`.
+Artwork and playback-state icons require a Discord application with matching uploaded asset keys.
 
 ## Authentication
 
-If Apollo authentication is enabled, the client prompts for the shared secret, exchanges it for a session token through `/api/auth/session`, and uses that token for later API calls.
+When Apollo authentication is enabled, the client exchanges the shared secret for a session token and uses that token for later API calls. Authentication data stays local to the machine running the client.
 
-Do not hardcode secrets in this repository. Runtime auth data should remain local to the machine running the client.
+## Status
+
+Apollo Client currently runs directly from source with Electron. Packaged installers or distributable binaries are not included yet.
 
 ## Documentation
 
 - [Plugin development](docs/plugins.md)
 
-## Project structure
+## Project layout
 
 ```text
 .
@@ -90,9 +95,6 @@ Do not hardcode secrets in this repository. Runtime auth data should remain loca
     `-- plugins.md
 ```
 
-## Notes
+## Plugin trust model
 
-- The UI is desktop-first.
-- Plugins currently run in the renderer process.
-- Lyrics lookups are client-side and currently use LRCLIB.
-- Longer implementation details should live under `docs/` rather than in this root README.
+Plugins run in the renderer as trusted application code. They are not sandboxed. The plugin runtime exposes broad access to client state, UI flows, playback controls, network helpers, and the preload desktop bridge.
