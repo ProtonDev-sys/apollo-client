@@ -35,6 +35,16 @@ If Apollo is running somewhere else, set `APOLLO_SERVER_URL` before launch:
 $env:APOLLO_SERVER_URL = "http://127.0.0.1:4848"
 ```
 
+Optional Discord Rich Presence defaults can also be supplied through environment variables:
+
+```powershell
+$env:APOLLO_DISCORD_CLIENT_ID = "your_discord_application_id"
+$env:APOLLO_DISCORD_LARGE_IMAGE_KEY = "apollo"
+$env:APOLLO_DISCORD_LARGE_IMAGE_TEXT = "Apollo Client"
+```
+
+You can also configure Rich Presence directly inside Apollo's settings modal. To show artwork or playback-status icons, create a Discord application and upload matching asset keys in the Discord developer portal.
+
 ## Run in development
 
 ```powershell
@@ -63,7 +73,6 @@ Do not hardcode secrets in this repository. Runtime auth data should remain loca
 ## Documentation
 
 - [Plugin development](docs/plugins.md)
-- [Security policy](SECURITY.md)
 
 ## Project structure
 
