@@ -2,7 +2,16 @@
 
 Apollo Client exposes a small renderer-side plugin host for extending the detail panel and lyrics resolution flow.
 
-## Current architecture
+## Scope
+
+Plugins currently support two extension points:
+
+- detail panel tabs
+- lyrics providers
+
+The system is intentionally small. There is no runtime marketplace, no external plugin directory, and no renderer sandbox for third-party code yet.
+
+## Architecture
 
 - Plugins are plain ES modules loaded by the renderer.
 - Built-in plugins are registered in `src/plugins/index.js`.
@@ -26,7 +35,7 @@ const plugin = {
 export default plugin;
 ```
 
-Rules:
+Requirements:
 
 - `id` must be unique.
 - `setup(api)` is required.
@@ -42,7 +51,7 @@ Inside `setup(api)`, the plugin receives:
 - `formatDuration(value)`
 - `providerLabel(providerId)`
 
-The shared helper functions come from the renderer host and are intended for consistent UI formatting.
+The shared helper functions come from the renderer host and keep plugin output consistent with the rest of the client.
 
 ## Detail tabs
 
@@ -70,7 +79,7 @@ api.registerDetailTab({
 });
 ```
 
-Tab contract:
+Detail tab fields:
 
 - `id`: required unique string.
 - `label`: required tab label.
@@ -83,7 +92,7 @@ Tab contract:
 - `context`: detail panel context from the renderer.
 - `services`: plugin-host services exposed at mount time.
 
-`mount` may return a cleanup function. The host calls it when the tab is replaced or re-rendered.
+`mount` may return a cleanup function. The host calls it when the tab is replaced or when the detail panel is re-rendered.
 
 ## Detail context
 
@@ -96,7 +105,7 @@ The current detail context includes:
 - `isTrackLiked(trackKey)`
 - `providerLabel(providerId)`
 
-Use `getPlaybackTrack()` for the actively playing item and `getSelectedTrack()` for the track highlighted in the list.
+Use `getPlaybackTrack()` for the actively playing item and `getSelectedTrack()` for the track currently highlighted in the list.
 
 ## Lyrics providers
 
@@ -122,7 +131,7 @@ api.registerLyricsProvider({
 });
 ```
 
-Provider contract:
+Lyrics provider fields:
 
 - `id`: required unique string.
 - `name`: required display name.
@@ -146,7 +155,7 @@ Resolver return shape:
 }
 ```
 
-Notes:
+Resolution behavior:
 
 - Returning `null` means "no result, try the next provider".
 - If a provider throws, the host ignores the failure and continues to later providers.
@@ -164,6 +173,14 @@ export const builtinPlugins = [lyricsPlugin, creditsPlugin];
 ```
 
 That is the only registration step in the current app.
+
+## Best practices
+
+- Keep the root README focused on setup and navigation; put plugin implementation detail here.
+- Use fenced code blocks with language identifiers for examples.
+- Prefer relative links when linking to repository files.
+- Avoid embedding secrets, internal endpoints, or local machine paths in examples.
+- Clean up listeners, timers, and observers from `mount` cleanup functions.
 
 ## Implementation notes
 

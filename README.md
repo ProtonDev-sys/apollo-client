@@ -4,7 +4,7 @@ Desktop Electron client for the Apollo music server.
 
 ## Overview
 
-This repository contains a desktop-first shell that talks directly to an Apollo server and renders:
+Apollo Client is a desktop-first shell that talks directly to an Apollo server and provides:
 
 - library and playlist browsing
 - track search and playback
@@ -12,29 +12,6 @@ This repository contains a desktop-first shell that talks directly to an Apollo 
 - auth/session handling against Apollo's API
 - a renderer-side plugin host for detail-panel extensions
 - a built-in lyrics plugin backed by LRCLIB
-
-## Tech stack
-
-- Electron 37
-- plain HTML, CSS, and JavaScript
-- no bundler
-- no TypeScript
-
-## Repository layout
-
-```text
-.
-|-- main.js              # Electron main process entry
-|-- preload.js           # Safe bridge into the renderer
-|-- src/
-|   |-- index.html       # Renderer markup
-|   |-- styles.css       # App styles
-|   |-- renderer.js      # Apollo client UI and API integration
-|   |-- plugin-host.js   # Plugin registration and mounting
-|   `-- plugins/         # Built-in plugins
-`-- docs/
-    `-- plugins.md       # Plugin authoring guide
-```
 
 ## Prerequisites
 
@@ -50,7 +27,7 @@ Install dependencies:
 npm.cmd install
 ```
 
-By default the client targets `http://127.0.0.1:4848`.
+By default the client connects to `http://127.0.0.1:4848`.
 
 If Apollo is running somewhere else, set `APOLLO_SERVER_URL` before launch:
 
@@ -66,77 +43,47 @@ npm.cmd start
 
 That starts Electron directly from the checked-out source.
 
-## Build status
+## Build
 
-This project does not currently define a packaging pipeline or installer build. The runnable desktop build is the source checkout launched with `npm.cmd start`.
+The project currently ships as source plus an Electron runtime. There is no packaging pipeline or installer script yet.
 
-If you want distributable binaries later, add a packager such as `electron-builder` or `electron-forge` and introduce explicit build scripts in `package.json`.
+Current build/run path:
 
-## Apollo server expectations
+- install dependencies with `npm.cmd install`
+- launch the desktop client with `npm.cmd start`
 
-The renderer expects the Apollo server to expose the client APIs used for:
+If you want distributable binaries later, add an Electron packager such as `electron-builder` or `electron-forge` and introduce explicit build scripts in `package.json`.
 
-- server health/status
-- library and playlist queries
-- playback/stream URLs
-- auth status and session creation
+## Authentication
 
-When Apollo authentication is enabled, the client prompts for the shared secret, exchanges it for a session token through `/api/auth/session`, and then sends bearer auth on later API calls.
+If Apollo authentication is enabled, the client prompts for the shared secret, exchanges it for a session token through `/api/auth/session`, and uses that token for later API calls.
 
-Security note:
+Do not hardcode secrets in this repository. Runtime auth data should remain local to the machine running the client.
 
-- Do not hardcode the shared secret in this repo.
-- Do not commit `.env` files or local auth/session artifacts.
-- The client stores only the issued session token in browser storage at runtime.
+## Documentation
 
-## Plugin system
+- [Plugin development](docs/plugins.md)
+- [Security policy](SECURITY.md)
 
-Apollo Client includes a small plugin host in the renderer. Plugins can currently do two things:
+## Project structure
 
-- add a tab to the detail panel
-- register lyrics providers used by the built-in lyrics flow
-
-The current built-in plugin is:
-
-- `src/plugins/lyrics-plugin.js`
-
-Plugin registration happens in:
-
-- `src/plugins/index.js`
-
-Detailed plugin authoring documentation lives here:
-
-- [docs/plugins.md](/C:/Users/proton/Documents/Development/Apollo%20client/docs/plugins.md)
-
-## Plugin quick start
-
-Create a plugin module in `src/plugins/`:
-
-```js
-const examplePlugin = {
-  id: "example",
-  name: "Example",
-  async setup(api) {
-    api.registerDetailTab({
-      id: "example",
-      label: "Example",
-      order: 50,
-      mount({ container, context }) {
-        const track = context.getSelectedTrack() || context.getPlaybackTrack();
-        container.innerHTML = `<p>${api.escapeHtml(track?.title || "Nothing selected")}</p>`;
-      }
-    });
-  }
-};
-
-export default examplePlugin;
+```text
+.
+|-- main.js
+|-- preload.js
+|-- src/
+|   |-- index.html
+|   |-- styles.css
+|   |-- renderer.js
+|   |-- plugin-host.js
+|   `-- plugins/
+`-- docs/
+    `-- plugins.md
 ```
-
-Then register it in `src/plugins/index.js`.
 
 ## Notes
 
+- The UI is desktop-first.
 - Plugins currently run in the renderer process.
-- There is no external plugin marketplace or dynamic loading yet.
 - Lyrics lookups are client-side and currently use LRCLIB.
-- This UI is desktop-first, though it scales down reasonably on smaller windows.
+- Longer implementation details should live under `docs/` rather than in this root README.
