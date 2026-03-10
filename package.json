@@ -4,7 +4,9 @@
   "description": "Desktop client shell for the Apollo music server.",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "build:discord-social-helper": "scripts\\build-discord-social-helper.cmd",
+    "build:win": "npm run build:discord-social-helper && electron-builder --win nsis"
   },
   "keywords": [
     "apollo",
@@ -13,7 +15,50 @@
   ],
   "author": "",
   "license": "MIT",
+  "build": {
+    "appId": "com.apollo.client",
+    "productName": "Apollo Client",
+    "npmRebuild": false,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "discord-presence.js",
+      "discord-social-bridge.js",
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "native-bin",
+        "to": "native-bin"
+      }
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "artifactName": "Apollo-Client-Setup-${version}.${ext}",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  },
   "devDependencies": {
-    "electron": "^37.0.0"
+    "electron": "^37.0.0",
+    "electron-builder": "^26.8.1"
+  },
+  "dependencies": {
+    "discord-rpc": "^4.0.1"
   }
 }

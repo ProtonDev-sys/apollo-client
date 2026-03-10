@@ -21,6 +21,43 @@
   </head>
   <body>
     <div class="app-shell">
+      <header class="window-topbar" aria-label="Application window">
+        <div class="window-topbar__drag">
+          <div class="window-brand">
+            <span class="window-brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="16.5" cy="7.5" r="3.5" opacity="0.62"/>
+                <path d="M6.5 17.5c1.7-3.4 4.7-5.6 9-6.5"/>
+                <path d="M12.5 18.5c.3-2.5 1.2-4.8 2.7-6.7"/>
+              </svg>
+            </span>
+            <div class="window-brand-copy">
+              <span class="window-brand-title">Apollo Client</span>
+              <span class="window-brand-meta">Desktop playback shell</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="window-controls" aria-label="Window controls">
+          <button id="window-minimize-button" class="window-control-button" type="button" aria-label="Minimize window" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+              <path d="M6 12h12"/>
+            </svg>
+          </button>
+          <button id="window-maximize-button" class="window-control-button" type="button" aria-label="Maximize window" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="6" y="6" width="12" height="12" rx="1.5"/>
+            </svg>
+          </button>
+          <button id="window-close-button" class="window-control-button window-control-button--close" type="button" aria-label="Close window" hidden>
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+              <path d="M7 7l10 10"/>
+              <path d="M17 7 7 17"/>
+            </svg>
+          </button>
+        </div>
+      </header>
+
       <header class="topbar">
         <div class="topbar-side">
           <button id="toggle-sidebar-button" class="chrome-button" type="button" aria-label="Toggle library">
@@ -43,19 +80,28 @@
           </button>
         </div>
 
-        <label class="search-shell" for="library-search">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path
-              d="M10.5 4a6.5 6.5 0 1 0 4.03 11.6l4.44 4.44 1.41-1.41-4.44-4.44A6.5 6.5 0 0 0 10.5 4Zm0 2a4.5 4.5 0 1 1 0 9.01 4.5 4.5 0 0 1 0-9.01Z"
-            />
-          </svg>
-          <input
-            id="library-search"
-            type="search"
-            placeholder="What do you want to play?"
-            autocomplete="off"
-          >
-        </label>
+        <div class="search-shell">
+          <label class="search-input-shell" for="library-search">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path
+                d="M10.5 4a6.5 6.5 0 1 0 4.03 11.6l4.44 4.44 1.41-1.41-4.44-4.44A6.5 6.5 0 0 0 10.5 4Zm0 2a4.5 4.5 0 1 1 0 9.01 4.5 4.5 0 0 1 0-9.01Z"
+              />
+            </svg>
+            <input
+              id="library-search"
+              type="text"
+              placeholder="Search tracks, artists, and albums"
+              autocomplete="off"
+            >
+          </label>
+          <button
+            id="clear-library-search-button"
+            class="search-clear-button"
+            type="button"
+            aria-label="Clear search"
+            hidden
+          >Clear</button>
+        </div>
 
         <div class="topbar-side topbar-side--right">
           <button id="auth-button" class="text-button topbar-auth-button" type="button" hidden>Sign in</button>
@@ -118,29 +164,34 @@
 
         <div class="transport">
           <div class="transport-buttons">
+            <button id="shuffle-button" class="icon-button" type="button" aria-label="Randomise playlist">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path fill="currentColor" d="M10.59 9.17L6.12 4.7a.996.996 0 1 0-1.41 1.41l4.46 4.46l1.42-1.4zm4.76-4.32l1.19 1.19L4.7 17.88a.996.996 0 1 0 1.41 1.41L17.96 7.46l1.19 1.19a.5.5 0 0 0 .85-.36V4.5c0-.28-.22-.5-.5-.5h-3.79a.5.5 0 0 0-.36.85zm-.52 8.56l-1.41 1.41l3.13 3.13l-1.2 1.2a.5.5 0 0 0 .36.85h3.79c.28 0 .5-.22.5-.5v-3.79c0-.45-.54-.67-.85-.35l-1.19 1.19l-3.13-3.14z"/>
+              </svg>
+            </button>
+            <div class="transport-main-controls">
+              <button id="previous-button" class="icon-button" type="button" aria-label="Previous">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path fill="currentColor" d="M7 6c.55 0 1 .45 1 1v10c0 .55-.45 1-1 1s-1-.45-1-1V7c0-.55.45-1 1-1zm3.66 6.82l5.77 4.07c.66.47 1.58-.01 1.58-.82V7.93c0-.81-.91-1.28-1.58-.82l-5.77 4.07a1 1 0 0 0 0 1.64z"/>
+                </svg>
+              </button>
+              <button id="play-button" class="icon-button icon-button--primary" type="button" aria-label="Play">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path fill="currentColor" d="M8 6.82v10.36c0 .79.87 1.27 1.54.84l8.14-5.18a1 1 0 0 0 0-1.69L9.54 5.98A.998.998 0 0 0 8 6.82z"/>
+                </svg>
+              </button>
+              <button id="next-button" class="icon-button" type="button" aria-label="Next">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path fill="currentColor" d="M7.58 16.89l5.77-4.07c.56-.4.56-1.24 0-1.63L7.58 7.11C6.91 6.65 6 7.12 6 7.93v8.14c0 .81.91 1.28 1.58.82zM16 7v10c0 .55.45 1 1 1s1-.45 1-1V7c0-.55-.45-1-1-1s-1 .45-1 1z"/>
+                </svg>
+              </button>
+            </div>
             <button id="repeat-button" class="icon-button" type="button" aria-label="Repeat">
               <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
                 <path d="m17 3 4 4-4 4"/>
                 <path d="M3 11V9a4 4 0 0 1 4-4h14"/>
                 <path d="m7 21-4-4 4-4"/>
                 <path d="M21 13v2a4 4 0 0 1-4 4H3"/>
-              </svg>
-            </button>
-            <button id="previous-button" class="icon-button" type="button" aria-label="Previous">
-              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M11 19 4 12l7-7v14Z"/>
-                <path d="M19 5v14"/>
-              </svg>
-            </button>
-            <button id="play-button" class="icon-button icon-button--primary" type="button" aria-label="Play">
-              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-                <path d="m7 5 11 7-11 7V5Z"/>
-              </svg>
-            </button>
-            <button id="next-button" class="icon-button" type="button" aria-label="Next">
-              <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
-                <path d="m13 5 7 7-7 7V5Z"/>
-                <path d="M5 5v14"/>
               </svg>
             </button>
           </div>
@@ -169,7 +220,7 @@
 
     <div id="playlist-modal" class="modal" aria-hidden="true">
       <div class="modal-backdrop" data-modal-close></div>
-      <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="playlist-modal-title">
+      <div class="modal-dialog modal-dialog--playlist" role="dialog" aria-modal="true" aria-labelledby="playlist-modal-title">
         <div class="modal-header">
           <div>
             <p class="panel-kicker">Playlist</p>
@@ -199,7 +250,7 @@
             <div class="playlist-artwork-field">
               <div id="playlist-artwork-preview" class="playlist-artwork-preview" aria-hidden="true"></div>
               <div class="playlist-artwork-controls">
-                <label class="secondary-button file-button" for="playlist-artwork-input">Choose artwork</label>
+                <button id="playlist-artwork-choose" class="secondary-button file-button" type="button">Choose artwork</button>
                 <input id="playlist-artwork-input" type="file" accept="image/png,image/jpeg,image/webp" hidden>
                 <button id="playlist-artwork-clear" class="text-button" type="button">Remove artwork</button>
                 <p id="playlist-artwork-status" class="field-message">No artwork selected.</p>
@@ -220,13 +271,41 @@
       </div>
     </div>
 
+    <div id="track-delete-modal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-track-delete-close></div>
+      <div class="modal-dialog modal-dialog--confirm" role="dialog" aria-modal="true" aria-labelledby="track-delete-modal-title">
+        <div class="modal-header">
+          <div>
+            <p class="panel-kicker">Library</p>
+            <h2 id="track-delete-modal-title" class="modal-title">Delete from Apollo</h2>
+          </div>
+          <button id="track-delete-modal-close" class="icon-text-button" type="button" aria-label="Close delete confirmation">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M18 6 6 18"/>
+              <path d="m6 6 12 12"/>
+            </svg>
+          </button>
+        </div>
+
+        <div class="modal-form">
+          <p id="track-delete-copy" class="modal-copy">Delete this track from Apollo?</p>
+          <p id="track-delete-message" class="field-message">This removes the saved file from the Apollo server library.</p>
+
+          <div class="modal-actions">
+            <button id="track-delete-cancel" class="text-button" type="button">Cancel</button>
+            <button id="track-delete-confirm" class="danger-button" type="button">Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div id="settings-modal" class="modal" aria-hidden="true">
       <div class="modal-backdrop" data-settings-close></div>
       <div class="modal-dialog modal-dialog--settings" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
         <div class="modal-header">
           <div>
             <p class="panel-kicker">Settings</p>
-            <h2 id="settings-modal-title" class="modal-title">Playback and audio</h2>
+            <h2 id="settings-modal-title" class="modal-title">Client settings</h2>
           </div>
           <button id="settings-modal-close" class="icon-text-button" type="button" aria-label="Close settings">
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
@@ -239,32 +318,70 @@
         <form id="settings-form" class="modal-form modal-form--settings">
           <section class="settings-section">
             <div class="settings-section-heading">
+              <h3>Server</h3>
+              <p>Connect Apollo Client to the preferred server instance.</p>
+            </div>
+
+            <div class="settings-grid settings-grid--server">
+              <label class="field">
+                <span>Protocol</span>
+                <select id="settings-server-protocol">
+                  <option value="http">http</option>
+                  <option value="https">https</option>
+                </select>
+              </label>
+
+              <label class="field">
+                <span>Port</span>
+                <input id="settings-server-port" type="number" min="1" max="65535" step="1" inputmode="numeric" required>
+              </label>
+
+              <label class="field field--wide">
+                <span>Server IP or host</span>
+                <input id="settings-server-hostname" type="text" placeholder="127.0.0.1" autocomplete="off" required>
+              </label>
+            </div>
+
+            <p class="field-message">Use the Apollo server LAN IP when connecting from another device on the network, or keep <code>127.0.0.1</code> when the server runs on this device.</p>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-section-heading">
               <h3>Playback</h3>
-              <p>How Apollo should behave when you browse and listen.</p>
+              <p>Playback behavior for browsing and listening.</p>
             </div>
 
             <label class="settings-toggle">
-              <span>
+              <span class="settings-toggle-copy">
                 <strong>Autoplay selected tracks</strong>
                 <small>Clicking a track starts playback immediately.</small>
               </span>
-              <input id="settings-autoplay-selection" type="checkbox">
+              <span class="toggle-switch">
+                <input id="settings-autoplay-selection" type="checkbox">
+                <span class="toggle-switch-ui" aria-hidden="true"></span>
+              </span>
             </label>
 
             <label class="settings-toggle">
-              <span>
+              <span class="settings-toggle-copy">
                 <strong>Restore last selected track</strong>
                 <small>Keep the last selected song highlighted between launches.</small>
               </span>
-              <input id="settings-restore-last-track" type="checkbox">
+              <span class="toggle-switch">
+                <input id="settings-restore-last-track" type="checkbox">
+                <span class="toggle-switch-ui" aria-hidden="true"></span>
+              </span>
             </label>
 
             <label class="settings-toggle">
-              <span>
+              <span class="settings-toggle-copy">
                 <strong>Pause when Apollo loses focus</strong>
-                <small>Useful if you want playback tied to the app window.</small>
+                <small>Pauses playback when the app window is not active.</small>
               </span>
-              <input id="settings-pause-on-blur" type="checkbox">
+              <span class="toggle-switch">
+                <input id="settings-pause-on-blur" type="checkbox">
+                <span class="toggle-switch-ui" aria-hidden="true"></span>
+              </span>
             </label>
 
             <div class="settings-grid">
@@ -329,11 +446,14 @@
             </div>
 
             <label class="settings-toggle">
-              <span>
+              <span class="settings-toggle-copy">
                 <strong>Start muted</strong>
-                <small>Mute playback until you unmute it again.</small>
+                <small>Playback starts muted until mute is turned off.</small>
               </span>
-              <input id="settings-muted" type="checkbox">
+              <span class="toggle-switch">
+                <input id="settings-muted" type="checkbox">
+                <span class="toggle-switch-ui" aria-hidden="true"></span>
+              </span>
             </label>
           </section>
 
@@ -344,36 +464,70 @@
             </div>
 
             <label class="settings-toggle">
-              <span>
-                <strong>Include your library</strong>
+              <span class="settings-toggle-copy">
+                <strong>Include library tracks</strong>
                 <small>Keep downloaded tracks in search results alongside remote providers.</small>
               </span>
-              <input id="settings-include-library" type="checkbox">
+              <span class="toggle-switch">
+                <input id="settings-include-library" type="checkbox">
+                <span class="toggle-switch-ui" aria-hidden="true"></span>
+              </span>
             </label>
 
             <div class="settings-provider-grid">
               <label class="settings-toggle">
-                <span>
+                <span class="settings-toggle-copy">
+                  <strong>Deezer</strong>
+                  <small>Fast no-key metadata provider for remote search.</small>
+                </span>
+                <span class="toggle-switch">
+                  <input id="settings-provider-deezer" type="checkbox">
+                  <span class="toggle-switch-ui" aria-hidden="true"></span>
+                </span>
+              </label>
+
+              <label class="settings-toggle">
+                <span class="settings-toggle-copy">
                   <strong>YouTube</strong>
                   <small>Remote search and download target.</small>
                 </span>
-                <input id="settings-provider-youtube" type="checkbox">
+                <span class="toggle-switch">
+                  <input id="settings-provider-youtube" type="checkbox">
+                  <span class="toggle-switch-ui" aria-hidden="true"></span>
+                </span>
               </label>
 
               <label class="settings-toggle">
-                <span>
+                <span class="settings-toggle-copy">
                   <strong>Spotify</strong>
                   <small>Metadata-backed results when Apollo has credentials.</small>
                 </span>
-                <input id="settings-provider-spotify" type="checkbox">
+                <span class="toggle-switch">
+                  <input id="settings-provider-spotify" type="checkbox">
+                  <span class="toggle-switch-ui" aria-hidden="true"></span>
+                </span>
               </label>
 
               <label class="settings-toggle">
-                <span>
+                <span class="settings-toggle-copy">
                   <strong>SoundCloud</strong>
                   <small>Include SoundCloud in Apollo search requests.</small>
                 </span>
-                <input id="settings-provider-soundcloud" type="checkbox">
+                <span class="toggle-switch">
+                  <input id="settings-provider-soundcloud" type="checkbox">
+                  <span class="toggle-switch-ui" aria-hidden="true"></span>
+                </span>
+              </label>
+
+              <label class="settings-toggle">
+                <span class="settings-toggle-copy">
+                  <strong>iTunes</strong>
+                  <small>Use Apple/iTunes search results when Apollo exposes them.</small>
+                </span>
+                <span class="toggle-switch">
+                  <input id="settings-provider-itunes" type="checkbox">
+                  <span class="toggle-switch-ui" aria-hidden="true"></span>
+                </span>
               </label>
             </div>
 
@@ -396,12 +550,43 @@
             </div>
 
             <label class="settings-toggle">
-              <span>
+              <span class="settings-toggle-copy">
                 <strong>Refresh library after server save</strong>
                 <small>Pull the new track into Apollo automatically after queueing a save.</small>
               </span>
-              <input id="settings-auto-refresh-library" type="checkbox">
+              <span class="toggle-switch">
+                <input id="settings-auto-refresh-library" type="checkbox">
+                <span class="toggle-switch-ui" aria-hidden="true"></span>
+              </span>
             </label>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-section-heading">
+              <h3>Discord Rich Presence</h3>
+              <p>Send the current song to Discord when Apollo is running in Electron and Discord desktop is open.</p>
+            </div>
+
+            <label class="settings-toggle">
+              <span class="settings-toggle-copy">
+                <strong>Enable Discord Rich Presence</strong>
+                <small>Shows the current track, artwork when available, a Play on Apollo button, and Discord join-in-place listen along for library tracks.</small>
+              </span>
+              <span class="toggle-switch">
+                <input id="settings-discord-enabled" type="checkbox">
+                <span class="toggle-switch-ui" aria-hidden="true"></span>
+              </span>
+            </label>
+
+            <div class="settings-discord-status">
+              <p id="settings-discord-social-status" class="field-message">Discord chat invites require a one-time account connection.</p>
+              <div class="settings-discord-actions">
+                <button id="settings-discord-social-connect" class="secondary-button" type="button">Connect Discord</button>
+                <button id="settings-discord-social-signout" class="text-button" type="button" hidden>Disconnect</button>
+              </div>
+            </div>
+
+              <p class="field-message">Apollo uses its built-in Discord app by default. Discord join and invite flows now happen from Discord itself, not from an Apollo button. The optional Play on Apollo button only appears when this client is using a non-localhost Apollo server URL, and library listen along depends on both users being connected to the same Apollo server.</p>
           </section>
 
           <p id="settings-form-message" class="field-message"></p>
@@ -436,6 +621,68 @@
 
           <div class="modal-actions">
             <button id="auth-submit-button" class="primary-button" type="submit">Sign in</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="connection-modal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop"></div>
+      <div class="modal-dialog modal-dialog--connection" role="dialog" aria-modal="true" aria-labelledby="connection-modal-title">
+        <div class="modal-header">
+          <div>
+            <p class="panel-kicker">Apollo API</p>
+            <h2 id="connection-modal-title" class="modal-title">Can't connect to Apollo</h2>
+          </div>
+        </div>
+
+        <div class="modal-form">
+          <p id="connection-modal-message" class="modal-copy">Apollo Client could not reach the server.</p>
+          <p class="field-message">Current server endpoint:</p>
+          <code id="connection-modal-endpoint" class="connection-endpoint">http://127.0.0.1:4848</code>
+
+          <div class="modal-actions">
+            <button id="connection-modal-settings" class="secondary-button" type="button">Server settings</button>
+            <button id="connection-modal-retry" class="primary-button" type="button">Retry</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="discord-invite-modal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-discord-invite-close></div>
+      <div class="modal-dialog modal-dialog--auth" role="dialog" aria-modal="true" aria-labelledby="discord-invite-modal-title">
+        <div class="modal-header">
+          <div>
+            <p class="panel-kicker">Discord</p>
+            <h2 id="discord-invite-modal-title" class="modal-title">Invite to listen along</h2>
+          </div>
+          <button id="discord-invite-modal-close" class="icon-text-button" type="button" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M18 6 6 18"/>
+              <path d="m6 6 12 12"/>
+            </svg>
+          </button>
+        </div>
+
+        <form id="discord-invite-form" class="modal-form">
+          <p class="modal-copy">Choose a Discord friend and Apollo will send a native activity invite into chat for the current library track.</p>
+
+          <label class="field">
+            <span>Invite message</span>
+            <input id="discord-invite-message-input" type="text" maxlength="120" value="Listen along on Apollo">
+          </label>
+
+          <div class="field">
+            <span>Friends</span>
+            <div id="discord-invite-friends" class="discord-friend-list" aria-live="polite"></div>
+          </div>
+
+          <p id="discord-invite-form-message" class="field-message"></p>
+
+          <div class="modal-actions">
+            <button id="discord-invite-cancel" class="text-button" type="button">Cancel</button>
+            <button id="discord-invite-submit" class="primary-button" type="submit">Send invite</button>
           </div>
         </form>
       </div>

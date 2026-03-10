@@ -55,29 +55,115 @@ function parseTimestamp(token) {
 function parseSyncedLyrics(value) {
   return String(value || "")
     .split(/\r?\n/)
-    .map((line) => {
-      const match = line.match(/^\[([^\]]+)\](.*)$/);
-      if (!match) {
-        return null;
+    .flatMap((line) => {
+      const matches = Array.from(String(line).matchAll(/\[([^\]]+)\]/g));
+      if (!matches.length) {
+        return [];
       }
 
-      const startMs = parseTimestamp(match[1]);
-      const text = match[2].trim();
-
-      if (!Number.isFinite(startMs) || !text) {
-        return null;
+      const text = String(line).replace(/\[[^\]]+\]/g, "").trim();
+      if (!text) {
+        return [];
       }
 
-      return {
-        startMs,
-        text
-      };
+      return matches
+        .map((match) => parseTimestamp(match[1]))
+        .filter(Number.isFinite)
+        .map((startMs) => ({
+          startMs,
+          text
+        }));
     })
     .filter(Boolean)
+    .sort((left, right) => left.startMs - right.startMs)
     .map((line, index, lines) => ({
       ...line,
       endMs: lines[index + 1]?.startMs ?? null
     }));
+}
+
+function getTrackDurationSeconds(track) {
+  const duration = Number(track?.normalizedDuration ?? track?.duration ?? 0);
+  return Number.isFinite(duration) && duration > 0 ? Math.round(duration) : 0;
+}
+
+function buildLrclibLookupParams(track, { includeAlbum = true, includeDuration = true } = {}) {
+  const params = new URLSearchParams({
+    track_name: cleanTrackTitle(track.title),
+    artist_name: primaryArtist(track.artist)
+  });
+
+  if (includeAlbum && track.album) {
+    params.set("album_name", track.album);
+  }
+
+  const durationSeconds = getTrackDurationSeconds(track);
+  if (includeDuration && durationSeconds) {
+    params.set("duration", String(durationSeconds));
+  }
+
+  return params;
+}
+
+async function fetchExactLyricsCandidate(track, fetchImpl) {
+  const variants = [
+    { includeAlbum: true, includeDuration: true },
+    { includeAlbum: false, includeDuration: true },
+    { includeAlbum: true, includeDuration: false },
+    { includeAlbum: false, includeDuration: false }
+  ];
+
+  for (const variant of variants) {
+    const response = await fetchImpl(`https://lrclib.net/api/get?${buildLrclibLookupParams(track, variant).toString()}`);
+    if (!response.ok) {
+      continue;
+    }
+
+    const payload = await response.json();
+    if (payload) {
+      return payload;
+    }
+  }
+
+  return null;
+}
+
+function pickBestCandidate(track, candidates) {
+  if (!Array.isArray(candidates) || !candidates.length) {
+    return null;
+  }
+
+  const ranked = candidates
+    .map((candidate, index) => {
+      const syncedLines = parseSyncedLyrics(candidate?.syncedLyrics);
+      return {
+        candidate,
+        index,
+        syncedLines,
+        score: scoreCandidate(candidate, track) + (syncedLines.length ? 10 : 0)
+      };
+    })
+    .sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+
+      if (right.syncedLines.length !== left.syncedLines.length) {
+        return right.syncedLines.length - left.syncedLines.length;
+      }
+
+      return left.index - right.index;
+    });
+
+  const best = ranked[0];
+  if (!best || best.score < 45) {
+    return null;
+  }
+
+  return {
+    payload: best.candidate,
+    lines: best.syncedLines
+  };
 }
 
 function buildPlainText(payload) {
@@ -148,39 +234,29 @@ async function fetchLyricsFromLrclib(track, fetchImpl = fetch) {
   }
 
   const request = (async () => {
-    const params = new URLSearchParams({
-      track_name: cleanTrackTitle(track.title),
-      artist_name: primaryArtist(track.artist)
-    });
-
-    if (track.album) {
-      params.set("album_name", track.album);
-    }
-
-    const response = await fetchImpl(`https://lrclib.net/api/search?${params.toString()}`);
+    const exactCandidate = await fetchExactLyricsCandidate(track, fetchImpl);
+    const response = await fetchImpl(`https://lrclib.net/api/search?${buildLrclibLookupParams(track, { includeAlbum: true, includeDuration: false }).toString()}`);
     if (!response.ok) {
       throw new Error("Lyrics lookup failed.");
     }
 
     const results = await response.json();
-    if (!Array.isArray(results) || !results.length) {
+    const combinedCandidates = [
+      ...(exactCandidate ? [exactCandidate] : []),
+      ...(Array.isArray(results) ? results : [])
+    ];
+
+    if (!combinedCandidates.length) {
       return null;
     }
 
-    const ranked = results
-      .map((candidate) => ({
-        candidate,
-        score: scoreCandidate(candidate, track)
-      }))
-      .sort((left, right) => right.score - left.score);
-
-    const best = ranked[0];
-    if (!best || best.score < 45) {
+    const best = pickBestCandidate(track, combinedCandidates);
+    if (!best) {
       return null;
     }
 
-    const payload = best.candidate;
-    const lines = parseSyncedLyrics(payload.syncedLyrics);
+    const payload = best.payload;
+    const lines = best.lines;
 
     return {
       source: "LRCLIB",
@@ -224,6 +300,72 @@ function renderLoading(container, track) {
   `;
 }
 
+function supportsLyricsFullscreen() {
+  return Boolean(document.fullscreenEnabled && document.documentElement?.requestFullscreen);
+}
+
+function renderLyricsHeader(track, meta) {
+  const fullscreenSupported = supportsLyricsFullscreen();
+
+  return `
+    <div class="lyrics-header">
+      <div>
+        <p class="lyrics-eyebrow">Lyrics</p>
+        <h3>${escapeHtml(track.title)}</h3>
+        <p class="lyrics-meta">${escapeHtml(meta)}</p>
+      </div>
+      ${fullscreenSupported
+        ? `
+          <div class="lyrics-header-actions">
+            <button class="lyrics-fullscreen-button" type="button" data-lyrics-fullscreen aria-label="Open fullscreen lyrics">
+              Fullscreen
+            </button>
+          </div>
+        `
+        : ""}
+    </div>
+  `;
+}
+
+function wireLyricsFullscreen(container) {
+  const panel = container.querySelector(".lyrics-panel");
+  const button = container.querySelector("[data-lyrics-fullscreen]");
+
+  if (!panel || !button || !supportsLyricsFullscreen()) {
+    return () => {};
+  }
+
+  const syncButton = () => {
+    const isFullscreen = document.fullscreenElement === panel;
+    button.classList.toggle("is-active", isFullscreen);
+    button.textContent = isFullscreen ? "Exit fullscreen" : "Fullscreen";
+    button.setAttribute("aria-label", isFullscreen ? "Exit fullscreen lyrics" : "Open fullscreen lyrics");
+  };
+
+  const handleToggle = async () => {
+    try {
+      if (document.fullscreenElement === panel) {
+        await document.exitFullscreen();
+      } else {
+        await panel.requestFullscreen();
+      }
+    } catch {
+      // Ignore fullscreen failures and leave the lyrics panel usable inline.
+    }
+
+    syncButton();
+  };
+
+  button.addEventListener("click", handleToggle);
+  document.addEventListener("fullscreenchange", syncButton);
+  syncButton();
+
+  return () => {
+    button.removeEventListener("click", handleToggle);
+    document.removeEventListener("fullscreenchange", syncButton);
+  };
+}
+
 function renderUnsyncedLyrics(container, track, lyrics) {
   const plainLines = lyrics.plainText
     .split(/\r?\n/)
@@ -232,37 +374,29 @@ function renderUnsyncedLyrics(container, track, lyrics) {
 
   container.innerHTML = `
     <div class="lyrics-panel">
-      <div class="lyrics-header">
-        <div>
-          <p class="lyrics-eyebrow">Lyrics</p>
-          <h3>${escapeHtml(track.title)}</h3>
-          <p class="lyrics-meta">Source: ${escapeHtml(lyrics.source)} | Static text</p>
-        </div>
-      </div>
+      ${renderLyricsHeader(track, `Source: ${lyrics.source} | Static text`)}
       <div class="lyrics-copy">
-        ${plainLines.map((line) => `<p class="lyrics-paragraph">${escapeHtml(line)}</p>`).join("")}
+        ${plainLines
+          .map((line, index) => `<p class="lyrics-paragraph" style="--line-index:${index};">${escapeHtml(line)}</p>`)
+          .join("")}
       </div>
     </div>
   `;
+
+  return wireLyricsFullscreen(container);
 }
 
 function renderSyncedLyrics(container, track, lyrics, context) {
   container.innerHTML = `
     <div class="lyrics-panel">
-      <div class="lyrics-header">
-        <div>
-          <p class="lyrics-eyebrow">Lyrics</p>
-          <h3>${escapeHtml(track.title)}</h3>
-          <p class="lyrics-meta">Source: ${escapeHtml(lyrics.source)} | Synced to playback</p>
-        </div>
-      </div>
+      ${renderLyricsHeader(track, `Source: ${lyrics.source} | Synced to playback | Click a line to seek`)}
       <div class="lyrics-lines">
         ${lyrics.lines
           .map(
             (line, index) => `
-              <p class="lyrics-line" data-line-index="${index}" data-start-ms="${line.startMs}" data-end-ms="${line.endMs ?? ""}">
+              <button class="lyrics-line" type="button" data-line-index="${index}" data-start-ms="${line.startMs}" data-end-ms="${line.endMs ?? ""}" style="--line-index:${index};">
                 ${escapeHtml(line.text)}
-              </p>
+              </button>
             `
           )
           .join("")}
@@ -271,7 +405,56 @@ function renderSyncedLyrics(container, track, lyrics, context) {
   `;
 
   const lineNodes = Array.from(container.querySelectorAll(".lyrics-line"));
+  const cleanupFullscreen = wireLyricsFullscreen(container);
   let activeIndex = -1;
+
+  const waitForSeekReady = () => {
+    if (context.audioPlayer.readyState >= 1) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const cleanup = () => {
+        context.audioPlayer.removeEventListener("loadedmetadata", onReady);
+        context.audioPlayer.removeEventListener("canplay", onReady);
+        context.audioPlayer.removeEventListener("error", onReady);
+      };
+      const onReady = () => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        cleanup();
+        resolve();
+      };
+
+      context.audioPlayer.addEventListener("loadedmetadata", onReady, { once: true });
+      context.audioPlayer.addEventListener("canplay", onReady, { once: true });
+      context.audioPlayer.addEventListener("error", onReady, { once: true });
+      setTimeout(onReady, 1200);
+    });
+  };
+
+  const seekToLine = async (line) => {
+    const targetSeconds = Math.max(0, Number(line?.startMs || 0) / 1000);
+    const playbackTrack = context.getPlaybackTrack();
+
+    if (!playbackTrack || playbackTrack.key !== track.key) {
+      await context.apollo?.playback?.playTrack?.(track, {
+        autoplay: true
+      });
+      await waitForSeekReady();
+    }
+
+    if (!Number.isFinite(targetSeconds)) {
+      return;
+    }
+
+    context.audioPlayer.currentTime = targetSeconds;
+    syncActiveLine();
+  };
 
   const syncActiveLine = () => {
     const playbackTrack = context.getPlaybackTrack();
@@ -304,10 +487,17 @@ function renderSyncedLyrics(container, track, lyrics, context) {
       const activeNode = lineNodes[activeIndex];
       activeNode?.classList.add("is-active");
       activeNode?.scrollIntoView({
-        block: "nearest"
+        block: "center",
+        behavior: "smooth"
       });
     }
   };
+
+  lineNodes.forEach((node, index) => {
+    node.addEventListener("click", () => {
+      void seekToLine(lyrics.lines[index]);
+    });
+  });
 
   context.audioPlayer.addEventListener("timeupdate", syncActiveLine);
   context.audioPlayer.addEventListener("seeked", syncActiveLine);
@@ -316,6 +506,7 @@ function renderSyncedLyrics(container, track, lyrics, context) {
   syncActiveLine();
 
   return () => {
+    cleanupFullscreen();
     context.audioPlayer.removeEventListener("timeupdate", syncActiveLine);
     context.audioPlayer.removeEventListener("seeked", syncActiveLine);
     context.audioPlayer.removeEventListener("play", syncActiveLine);
@@ -381,7 +572,7 @@ const lyricsPlugin = {
               return;
             }
 
-            renderUnsyncedLyrics(container, track, lyrics);
+            cleanup = renderUnsyncedLyrics(container, track, lyrics) || (() => {});
           } catch (error) {
             if (disposed) {
               return;

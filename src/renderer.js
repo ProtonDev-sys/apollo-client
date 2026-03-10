@@ -5,8 +5,22 @@ const LIKED_STORAGE_KEY = "apollo-liked-tracks";
 const LAYOUT_STORAGE_KEY = "apollo-layout-v1";
 const SETTINGS_STORAGE_KEY = "apollo-settings-v1";
 const PLAYBACK_STATE_STORAGE_KEY = "apollo-playback-state-v1";
+const PLAYBACK_QUEUE_STORAGE_KEY = "apollo-playback-queue-v1";
 const AUTH_STORAGE_KEY = "apollo-auth-session-v1";
+const CLIENT_ID_STORAGE_KEY = "apollo-client-id-v1";
 const desktopDiscordDefaults = window.apolloDesktop?.discordPresenceDefaults || {};
+const discordSocialBridge = window.apolloDesktop?.discordSocial || null;
+const DEFAULT_SERVER_URL = window.apolloDesktop?.serverUrl || "http://127.0.0.1:4848";
+const APOLLO_DEEP_LINK_ROUTE_PLAY = "play";
+const APOLLO_DEEP_LINK_ROUTE_LISTEN = "listen";
+const DISCORD_LISTEN_ALONG_PARTY_MAX = 8;
+const DISCORD_LISTEN_SESSION_POLL_MS = 1000;
+const DISCORD_LISTEN_SESSION_RESYNC_THRESHOLD_SECONDS = 1;
+const SEARCH_HISTORY_GROUP_WINDOW_MS = 1500;
+const NAVIGATION_INPUT_DEDUPE_MS = 400;
+const PROVIDER_ID_KEYS = ["spotify", "youtube", "soundcloud", "itunes", "isrc"];
+const PLAYBACK_URL_CACHE_TTL_MS = 5 * 60 * 1000;
+const DEFAULT_CONNECTION_SETTINGS = parseConnectionSettings(DEFAULT_SERVER_URL);
 const DEFAULT_LAYOUT = {
   order: ["sidebar", "tracks", "detail"],
   widths: {
@@ -19,6 +33,9 @@ const DEFAULT_LAYOUT = {
   }
 };
 const DEFAULT_SETTINGS = {
+  connection: {
+    ...DEFAULT_CONNECTION_SETTINGS
+  },
   playback: {
     autoplaySelection: true,
     restoreLastTrack: true,
@@ -36,9 +53,11 @@ const DEFAULT_SETTINGS = {
   search: {
     includeLibraryResults: true,
     providers: {
+      deezer: true,
       youtube: true,
       spotify: true,
-      soundcloud: true
+      soundcloud: true,
+      itunes: true
     },
     liveSearchDelayMs: 220
   },
@@ -57,10 +76,23 @@ const DEFAULT_SETTINGS = {
     }
   }
 };
-const searchProviderOrder = ["youtube", "spotify", "soundcloud"];
+const searchProviderOrder = ["deezer", "youtube", "spotify", "soundcloud", "itunes"];
 const initialSettings = loadSettings();
 const savedPlaybackState = loadPlaybackState();
+const savedPlaybackQueue = loadPlaybackQueue();
+const initialPlaybackQueueState = restorePersistedQueueState(savedPlaybackQueue, savedPlaybackState);
 const savedAuthSession = loadAuthSession();
+const windowControls = window.apolloDesktop?.windowControls || null;
+const LOCAL_DISCORD_HOSTNAMES = new Set(["127.0.0.1", "localhost", "0.0.0.0", "::1"]);
+const LOCAL_NETWORK_IPV4_PATTERN = /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.)/;
+const listenAlongState = {
+  publishedSessionId: "",
+  publishedTrackId: "",
+  joinedSessionId: "",
+  joinedTrackId: "",
+  pollHandle: 0,
+  pollInFlight: false
+};
 
 function createPlaylistModalState(overrides = {}) {
   return {
@@ -77,8 +109,138 @@ function createPlaylistModalState(overrides = {}) {
   };
 }
 
+function createDiscordInviteState(overrides = {}) {
+  return {
+    isOpen: false,
+    isLoading: false,
+    isSending: false,
+    selectedFriendId: "",
+    friends: [],
+    message: "Listen along on Apollo",
+    formMessage: "",
+    ...overrides
+  };
+}
+
+function createTrackDeleteModalState(overrides = {}) {
+  return {
+    isOpen: false,
+    isDeleting: false,
+    track: null,
+    message: "",
+    ...overrides
+  };
+}
+
+function createClientId() {
+  if (typeof crypto?.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  return `apollo-client-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function loadClientId() {
+  try {
+    const existingClientId = localStorage.getItem(CLIENT_ID_STORAGE_KEY);
+    if (existingClientId) {
+      return existingClientId;
+    }
+  } catch {
+    // Ignore storage access failures and regenerate below.
+  }
+
+  const clientId = createClientId();
+  try {
+    localStorage.setItem(CLIENT_ID_STORAGE_KEY, clientId);
+  } catch {
+    // Ignore storage access failures.
+  }
+  return clientId;
+}
+
+function getDefaultPort(protocol) {
+  return protocol === "https" ? "443" : "80";
+}
+
+function parseConnectionSettings(url) {
+  try {
+    const parsedUrl = new URL(String(url || "").trim() || DEFAULT_SERVER_URL);
+    const protocol = parsedUrl.protocol === "https:" ? "https" : "http";
+    return {
+      protocol,
+      hostname: parsedUrl.hostname || "127.0.0.1",
+      port: parsedUrl.port || getDefaultPort(protocol)
+    };
+  } catch {
+    return {
+      protocol: "http",
+      hostname: "127.0.0.1",
+      port: "4848"
+    };
+  }
+}
+
+function normaliseConnectionSettings(connection = {}) {
+  let protocol = String(connection?.protocol || "http").trim().toLowerCase();
+  let hostname = String(connection?.hostname || "").trim();
+  let port = String(connection?.port || "").trim();
+
+  if (hostname.includes("://")) {
+    const parsedUrl = new URL(hostname);
+    protocol = parsedUrl.protocol === "https:" ? "https" : "http";
+    hostname = parsedUrl.hostname;
+    if (!port) {
+      port = parsedUrl.port;
+    }
+  }
+
+  if (!["http", "https"].includes(protocol)) {
+    throw new Error("Choose a valid Apollo server protocol.");
+  }
+
+  if (!hostname) {
+    throw new Error("Enter the Apollo server IP or host name.");
+  }
+
+  if (/[/?#]/.test(hostname)) {
+    throw new Error("Enter only the Apollo server host or IP, not a full path.");
+  }
+
+  const resolvedPort = port || getDefaultPort(protocol);
+  if (!/^\d+$/.test(resolvedPort)) {
+    throw new Error("Enter a valid Apollo server port.");
+  }
+
+  const numericPort = Number(resolvedPort);
+  if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535) {
+    throw new Error("Apollo server port must be between 1 and 65535.");
+  }
+
+  return {
+    protocol,
+    hostname: hostname.replace(/^\[|\]$/g, ""),
+    port: String(numericPort)
+  };
+}
+
+function buildApiBase(connection = DEFAULT_CONNECTION_SETTINGS) {
+  const normalisedConnection = normaliseConnectionSettings(connection);
+  return `${normalisedConnection.protocol}://${normalisedConnection.hostname}:${normalisedConnection.port}`;
+}
+
+function createConnectionModalState(overrides = {}) {
+  return {
+    isOpen: false,
+    message: "",
+    endpoint: "",
+    ...overrides
+  };
+}
+
 const state = {
-  apiBase: window.apolloDesktop?.serverUrl || "http://127.0.0.1:4848",
+  apiBase: buildApiBase(initialSettings.connection),
+  clientId: loadClientId(),
   layout: loadLayout(),
   settings: initialSettings,
   auth: {
@@ -94,24 +256,55 @@ const state = {
   selectedPlaylistId: savedPlaybackState.selectedPlaylistId || "all-tracks",
   selectedTrackKey: savedPlaybackState.selectedTrackKey || null,
   playbackTrackKey: savedPlaybackState.playbackTrackKey || null,
+  playbackManualQueue: initialPlaybackQueueState.manualQueue,
+  playbackContextQueue: initialPlaybackQueueState.contextQueue,
+  playbackContextIndex: initialPlaybackQueueState.contextIndex,
+  playbackAutoplayQueue: initialPlaybackQueueState.autoplayQueue,
+  playbackCurrentSource: initialPlaybackQueueState.currentSource,
+  playbackQueueMode: savedPlaybackState.playbackQueueMode || "context",
+  transientPlaybackTrack: null,
   activeMenuTrackKey: null,
   activeMenuAnchor: null,
   activePlaylistMenuId: null,
   activePlaylistMenuAnchor: null,
+  activeQueueMenuId: "",
+  activeQueueMenuAnchor: null,
   activeDetailTab: savedPlaybackState.activeDetailTab || "track",
   query: "",
   searchResults: [],
+  artistSearchResults: [],
+  artistBrowse: null,
   isConnected: false,
   isLoading: false,
   isBuffering: false,
   isPlaying: false,
   message: "",
+  queueAutofillInFlight: false,
+  shuffleEnabled: Boolean(savedPlaybackState.shuffleEnabled),
   repeatMode: savedPlaybackState.repeatMode || initialSettings.playback.defaultRepeatMode,
   searchTimer: null,
   modal: createPlaylistModalState(),
+  discordInvite: createDiscordInviteState(),
+  trackDeleteModal: createTrackDeleteModalState(),
+  connectionModal: createConnectionModalState(),
   settingsModalOpen: false,
   restoredPlaybackKey: savedPlaybackState.playbackTrackKey || null,
-  wasPlayingBeforeBlur: false
+  wasPlayingBeforeBlur: false,
+  discordSocial: {
+    available: Boolean(discordSocialBridge?.available),
+    helperRunning: false,
+    authenticated: false,
+    ready: false,
+    authInProgress: false,
+    message: discordSocialBridge?.available
+      ? "Discord chat invites require a one-time account connection."
+      : "Discord chat invites are unavailable in this build."
+  },
+  windowChrome: {
+    available: Boolean(windowControls?.available),
+    isFocused: true,
+    isMaximized: false
+  }
 };
 const playbackState = {
   currentTime: savedPlaybackState.currentTime || 0
@@ -119,12 +312,32 @@ const playbackState = {
 
 const durationCache = new Map();
 const playbackUrlCache = new Map();
+const pendingPlaybackUrlCache = new Map();
+const searchResultCache = new Map();
+const artistSearchCache = new Map();
+const artistProfileCache = new Map();
+const artistTracksCache = new Map();
+const artistReleasesCache = new Map();
 const pendingDurationKeys = new Set();
 const likedTracks = loadLikedTracks();
 let pluginHost;
 
 let detailTabCleanup = null;
 let resizeSession = null;
+let removeWindowControlsListener = null;
+let activeSearchRequestId = 0;
+let activeArtistBrowseRequestId = 0;
+let activePlaybackRequestId = 0;
+let activeQueueDragId = "";
+let queueEntryIdCounter = 0;
+let activeSearchAbortController = null;
+let activeArtistBrowseAbortController = null;
+let currentNavigationSnapshot = null;
+let lastNavigationCommitSource = "";
+let lastNavigationCommitAt = 0;
+let isApplyingNavigationHistory = false;
+let lastNavigationInputAt = 0;
+let lastNavigationInputDirection = 0;
 
 const workspace = document.querySelector("#workspace");
 const sidebarPanel = document.querySelector("#sidebar-panel");
@@ -145,6 +358,10 @@ const toggleSidebarButton = document.querySelector("#toggle-sidebar-button");
 const toggleDetailButton = document.querySelector("#toggle-detail-button");
 const resetLayoutButton = document.querySelector("#reset-layout-button");
 const searchInput = document.querySelector("#library-search");
+const clearSearchButton = document.querySelector("#clear-library-search-button");
+const windowMinimizeButton = document.querySelector("#window-minimize-button");
+const windowMaximizeButton = document.querySelector("#window-maximize-button");
+const windowCloseButton = document.querySelector("#window-close-button");
 const nowPlaying = document.querySelector("#now-playing");
 const serverStatus = document.querySelector("#server-status");
 const trackPaneKicker = document.querySelector("#track-pane-kicker");
@@ -156,6 +373,7 @@ const progressFill = document.querySelector("#progress-fill");
 const progressButton = document.querySelector("#progress-button");
 const audioPlayer = document.querySelector("#audio-player");
 const repeatButton = document.querySelector("#repeat-button");
+const shuffleButton = document.querySelector("#shuffle-button");
 const playButton = document.querySelector("#play-button");
 const previousButton = document.querySelector("#previous-button");
 const nextButton = document.querySelector("#next-button");
@@ -177,6 +395,12 @@ const playlistArtworkInput = document.querySelector("#playlist-artwork-input");
 const playlistArtworkPreview = document.querySelector("#playlist-artwork-preview");
 const playlistArtworkStatus = document.querySelector("#playlist-artwork-status");
 const playlistArtworkClear = document.querySelector("#playlist-artwork-clear");
+const trackDeleteModal = document.querySelector("#track-delete-modal");
+const trackDeleteModalClose = document.querySelector("#track-delete-modal-close");
+const trackDeleteCopy = document.querySelector("#track-delete-copy");
+const trackDeleteMessage = document.querySelector("#track-delete-message");
+const trackDeleteCancel = document.querySelector("#track-delete-cancel");
+const trackDeleteConfirm = document.querySelector("#track-delete-confirm");
 const authButton = document.querySelector("#auth-button");
 const authModal = document.querySelector("#auth-modal");
 const authForm = document.querySelector("#auth-form");
@@ -184,12 +408,20 @@ const authSecretInput = document.querySelector("#auth-secret-input");
 const authFormCopy = document.querySelector("#auth-form-copy");
 const authFormMessage = document.querySelector("#auth-form-message");
 const authSubmitButton = document.querySelector("#auth-submit-button");
+const connectionModal = document.querySelector("#connection-modal");
+const connectionModalMessage = document.querySelector("#connection-modal-message");
+const connectionModalEndpoint = document.querySelector("#connection-modal-endpoint");
+const connectionModalRetry = document.querySelector("#connection-modal-retry");
+const connectionModalSettings = document.querySelector("#connection-modal-settings");
 const openSettingsButton = document.querySelector("#open-settings-button");
 const settingsModal = document.querySelector("#settings-modal");
 const settingsForm = document.querySelector("#settings-form");
 const settingsModalClose = document.querySelector("#settings-modal-close");
 const settingsFormCancel = document.querySelector("#settings-form-cancel");
 const settingsFormMessage = document.querySelector("#settings-form-message");
+const settingsServerProtocol = document.querySelector("#settings-server-protocol");
+const settingsServerHostname = document.querySelector("#settings-server-hostname");
+const settingsServerPort = document.querySelector("#settings-server-port");
 const settingsAutoplaySelection = document.querySelector("#settings-autoplay-selection");
 const settingsRestoreLastTrack = document.querySelector("#settings-restore-last-track");
 const settingsPauseOnBlur = document.querySelector("#settings-pause-on-blur");
@@ -201,18 +433,25 @@ const settingsMuted = document.querySelector("#settings-muted");
 const settingsVolumeStep = document.querySelector("#settings-volume-step");
 const settingsPreloadMode = document.querySelector("#settings-preload-mode");
 const settingsIncludeLibrary = document.querySelector("#settings-include-library");
+const settingsProviderDeezer = document.querySelector("#settings-provider-deezer");
 const settingsProviderYoutube = document.querySelector("#settings-provider-youtube");
 const settingsProviderSpotify = document.querySelector("#settings-provider-spotify");
 const settingsProviderSoundcloud = document.querySelector("#settings-provider-soundcloud");
+const settingsProviderItunes = document.querySelector("#settings-provider-itunes");
 const settingsSearchDelay = document.querySelector("#settings-search-delay");
 const settingsAutoRefreshLibrary = document.querySelector("#settings-auto-refresh-library");
 const settingsDiscordEnabled = document.querySelector("#settings-discord-enabled");
-const settingsDiscordClientId = document.querySelector("#settings-discord-client-id");
-const settingsDiscordLargeImageKey = document.querySelector("#settings-discord-large-image-key");
-const settingsDiscordLargeImageText = document.querySelector("#settings-discord-large-image-text");
-const settingsDiscordSmallImagePlaying = document.querySelector("#settings-discord-small-image-playing");
-const settingsDiscordSmallImagePaused = document.querySelector("#settings-discord-small-image-paused");
-const settingsDiscordSmallImageBuffering = document.querySelector("#settings-discord-small-image-buffering");
+const settingsDiscordSocialStatus = document.querySelector("#settings-discord-social-status");
+const settingsDiscordSocialConnect = document.querySelector("#settings-discord-social-connect");
+const settingsDiscordSocialSignout = document.querySelector("#settings-discord-social-signout");
+const discordInviteModal = document.querySelector("#discord-invite-modal");
+const discordInviteForm = document.querySelector("#discord-invite-form");
+const discordInviteModalClose = document.querySelector("#discord-invite-modal-close");
+const discordInviteCancel = document.querySelector("#discord-invite-cancel");
+const discordInviteFriends = document.querySelector("#discord-invite-friends");
+const discordInviteMessageInput = document.querySelector("#discord-invite-message-input");
+const discordInviteFormMessage = document.querySelector("#discord-invite-form-message");
+const discordInviteSubmit = document.querySelector("#discord-invite-submit");
 
 function loadLikedTracks() {
   try {
@@ -292,6 +531,18 @@ function mergeSettings(base, override) {
     return merged;
   }
 
+  try {
+    merged.connection = normaliseConnectionSettings({
+      protocol: override?.connection?.protocol ?? merged.connection.protocol,
+      hostname: override?.connection?.hostname ?? merged.connection.hostname,
+      port: override?.connection?.port ?? merged.connection.port
+    });
+  } catch {
+    merged.connection = {
+      ...merged.connection
+    };
+  }
+
   merged.playback.autoplaySelection = override?.playback?.autoplaySelection ?? merged.playback.autoplaySelection;
   merged.playback.restoreLastTrack = override?.playback?.restoreLastTrack ?? merged.playback.restoreLastTrack;
   merged.playback.pauseOnBlur = override?.playback?.pauseOnBlur ?? merged.playback.pauseOnBlur;
@@ -369,6 +620,19 @@ function loadPlaybackState() {
   }
 }
 
+function loadPlaybackQueue() {
+  try {
+    const raw = localStorage.getItem(PLAYBACK_QUEUE_STORAGE_KEY);
+    if (!raw) {
+      return null;
+    }
+
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
 function persistPlaybackState() {
   localStorage.setItem(
     PLAYBACK_STATE_STORAGE_KEY,
@@ -377,8 +641,36 @@ function persistPlaybackState() {
       selectedTrackKey: state.selectedTrackKey,
       playbackTrackKey: state.playbackTrackKey,
       activeDetailTab: state.activeDetailTab,
+      playbackContextIndex: state.playbackContextIndex,
+      playbackCurrentSource: state.playbackCurrentSource,
+      playbackQueueMode: state.playbackQueueMode,
+      shuffleEnabled: state.shuffleEnabled,
       repeatMode: state.repeatMode,
       currentTime: audioPlayer.currentTime || playbackState.currentTime || 0
+    })
+  );
+}
+
+function persistPlaybackQueue() {
+  if (
+    !state.playbackManualQueue.length
+    && !state.playbackContextQueue.length
+    && !state.playbackAutoplayQueue.length
+  ) {
+    localStorage.removeItem(PLAYBACK_QUEUE_STORAGE_KEY);
+    return;
+  }
+
+  localStorage.setItem(
+    PLAYBACK_QUEUE_STORAGE_KEY,
+    JSON.stringify({
+      version: 2,
+      mode: state.playbackQueueMode,
+      currentSource: state.playbackCurrentSource,
+      contextIndex: state.playbackContextIndex,
+      contextQueue: state.playbackContextQueue,
+      manualQueue: state.playbackManualQueue,
+      autoplayQueue: state.playbackAutoplayQueue
     })
   );
 }
@@ -433,6 +725,23 @@ function clampNumber(value, min, max, fallback) {
   return Math.min(max, Math.max(min, numeric));
 }
 
+function syncRangeVisual(input, fallback = 0) {
+  if (!(input instanceof HTMLInputElement)) {
+    return;
+  }
+
+  const min = Number(input.min || 0);
+  const max = Number(input.max || 1);
+  const value = clampNumber(input.value, min, max, fallback);
+  const percent = max <= min ? 0 : ((value - min) / (max - min)) * 100;
+  input.style.setProperty("--range-percent", `${percent}%`);
+}
+
+function syncRangeVisuals() {
+  syncRangeVisual(volumeSlider, state.settings.audio.volume);
+  syncRangeVisual(settingsVolume, state.settings.audio.volume);
+}
+
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (character) => {
     const entities = {
@@ -456,10 +765,11 @@ function outlinedSvg(content, viewBox = "0 0 24 24") {
 }
 
 function noteIcon() {
-  return outlinedSvg(`
-      <rect x="18" y="18" width="52" height="52" rx="16" opacity="0.18"/>
-      <path d="M51 27v29.5a8.5 8.5 0 1 1-4.5-7.5V35.5L66 31v25.5a8.5 8.5 0 1 1-4.5-7.5V23Z"/>
-    `, "0 0 88 88");
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="currentColor" d="M12 3v10.55c-.59-.34-1.27-.55-2-.55c-2.21 0-4 1.79-4 4s1.79 4 4 4s4-1.79 4-4V7h4V3h-6z"/>
+    </svg>
+  `;
 }
 
 function heartIcon(filled) {
@@ -487,36 +797,99 @@ function dotsIcon() {
 }
 
 function getPreviousIcon() {
-  return outlinedSvg(`
-      <path d="M11 19 4 12l7-7v14Z"/>
-      <path d="M19 5v14"/>
-    `);
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="currentColor" d="M7 6c.55 0 1 .45 1 1v10c0 .55-.45 1-1 1s-1-.45-1-1V7c0-.55.45-1 1-1zm3.66 6.82l5.77 4.07c.66.47 1.58-.01 1.58-.82V7.93c0-.81-.91-1.28-1.58-.82l-5.77 4.07a1 1 0 0 0 0 1.64z"/>
+    </svg>
+  `;
 }
 
 function getNextIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="currentColor" d="M7.58 16.89l5.77-4.07c.56-.4.56-1.24 0-1.63L7.58 7.11C6.91 6.65 6 7.12 6 7.93v8.14c0 .81.91 1.28 1.58.82zM16 7v10c0 .55.45 1 1 1s1-.45 1-1V7c0-.55-.45-1-1-1s-1 .45-1 1z"/>
+    </svg>
+  `;
+}
+
+function getWindowMaximizeIcon() {
+  if (state.windowChrome.isMaximized) {
+    return outlinedSvg(`
+        <path d="M8 8h9v9H8Z"/>
+        <path d="M11 8V5h8v8h-2"/>
+      `);
+  }
+
   return outlinedSvg(`
-      <path d="m13 5 7 7-7 7V5Z"/>
-      <path d="M5 5v14"/>
+      <rect x="6" y="6" width="12" height="12" rx="1.5"/>
     `);
 }
 
+function renderWindowChrome() {
+  document.body.classList.toggle("has-custom-chrome", state.windowChrome.available);
+  document.body.classList.toggle("window-is-maximized", state.windowChrome.available && state.windowChrome.isMaximized);
+  document.body.classList.toggle("window-is-focused", !state.windowChrome.available || state.windowChrome.isFocused);
+
+  [windowMinimizeButton, windowMaximizeButton, windowCloseButton].forEach((button) => {
+    if (button) {
+      button.hidden = !state.windowChrome.available;
+    }
+  });
+
+  if (!state.windowChrome.available || !windowMaximizeButton) {
+    return;
+  }
+
+  windowMaximizeButton.innerHTML = getWindowMaximizeIcon();
+  windowMaximizeButton.setAttribute(
+    "aria-label",
+    state.windowChrome.isMaximized ? "Restore window" : "Maximize window"
+  );
+}
+
+function updateWindowChrome(nextState = {}) {
+  state.windowChrome.isFocused = nextState.isFocused ?? state.windowChrome.isFocused;
+  state.windowChrome.isMaximized = Boolean(nextState.isMaximized);
+  renderWindowChrome();
+}
+
 function getPlayButtonIcon() {
-  if (state.isBuffering) {
-    return outlinedSvg(`
-      <path d="M21 12a9 9 0 1 1-6.2-8.56"/>
-    `);
+  if (state.isPlaying || state.isBuffering) {
+    return `
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path fill="currentColor" d="M8 19c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2s-2 .9-2 2v10c0 1.1.9 2 2 2zm6-12v10c0 1.1.9 2 2 2s2-.9 2-2V7c0-1.1-.9-2-2-2s-2 .9-2 2z"/>
+      </svg>
+    `;
   }
 
-  if (state.isPlaying) {
-    return outlinedSvg(`
-      <path d="M10 5v14"/>
-      <path d="M14 5v14"/>
-    `);
-  }
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="currentColor" d="M8 6.82v10.36c0 .79.87 1.27 1.54.84l8.14-5.18a1 1 0 0 0 0-1.69L9.54 5.98A.998.998 0 0 0 8 6.82z"/>
+    </svg>
+  `;
+}
 
+function playGlyphIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="currentColor" d="M8 6.82v10.36c0 .79.87 1.27 1.54.84l8.14-5.18a1 1 0 0 0 0-1.69L9.54 5.98A.998.998 0 0 0 8 6.82z"/>
+    </svg>
+  `;
+}
+
+function closeSmallIcon() {
   return outlinedSvg(`
-      <path d="m7 5 11 7-11 7V5Z"/>
+      <path d="M18 6 6 18"/>
+      <path d="m6 6 12 12"/>
     `);
+}
+
+function getShuffleIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path fill="currentColor" d="M10.59 9.17L6.12 4.7a.996.996 0 1 0-1.41 1.41l4.46 4.46l1.42-1.4zm4.76-4.32l1.19 1.19L4.7 17.88a.996.996 0 1 0 1.41 1.41L17.96 7.46l1.19 1.19a.5.5 0 0 0 .85-.36V4.5c0-.28-.22-.5-.5-.5h-3.79a.5.5 0 0 0-.36.85zm-.52 8.56l-1.41 1.41l3.13 3.13l-1.2 1.2a.5.5 0 0 0 .36.85h3.79c.28 0 .5-.22.5-.5v-3.79c0-.45-.54-.67-.85-.35l-1.19 1.19l-3.13-3.14z"/>
+    </svg>
+  `;
 }
 
 function getRepeatIcon() {
@@ -588,15 +961,25 @@ function formatDuration(value, fallback = "0:00") {
   return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
 }
 
-function providerLabel(provider) {
+function providerLabel(provider, requestedProvider = "") {
   const labels = {
     library: "Library",
+    deezer: "Deezer",
     spotify: "Spotify",
     youtube: "YouTube",
-    soundcloud: "SoundCloud"
+    soundcloud: "SoundCloud",
+    itunes: "iTunes",
+    musicbrainz: "MusicBrainz"
   };
 
-  return labels[provider] || provider || "Remote";
+  const resolvedProvider = labels[provider] || provider || "Remote";
+  const resolvedRequestedProvider = labels[requestedProvider] || requestedProvider || "";
+
+  if (resolvedRequestedProvider && requestedProvider !== provider) {
+    return `${resolvedRequestedProvider} via ${resolvedProvider}`;
+  }
+
+  return resolvedProvider;
 }
 
 function isProtectedApolloUrl(url) {
@@ -626,8 +1009,56 @@ function getAuthorizationHeader() {
   return state.auth.token ? `Bearer ${state.auth.token}` : "";
 }
 
+function isConnectionError(error) {
+  return error?.code === "APOLLO_CONNECTION_FAILED";
+}
+
+function createConnectionError(message, cause) {
+  const error = new Error(message);
+  error.code = "APOLLO_CONNECTION_FAILED";
+  if (cause) {
+    error.cause = cause;
+  }
+  return error;
+}
+
+function buildConnectionFailureMessage(error) {
+  if (error?.message?.includes("Invalid URL")) {
+    return "The Apollo server address is invalid. Update the protocol, IP, or port in Settings.";
+  }
+
+  return `Couldn't reach Apollo at ${state.apiBase}. Check that the server is running and that the IP and port are correct.`;
+}
+
+function openConnectionModal(message = buildConnectionFailureMessage()) {
+  state.connectionModal = createConnectionModalState({
+    isOpen: true,
+    message,
+    endpoint: state.apiBase
+  });
+  state.isConnected = false;
+  closeAuthModal();
+  connectionModalMessage.textContent = message;
+  connectionModalEndpoint.textContent = state.apiBase;
+  connectionModal.classList.add("is-open");
+  connectionModal.setAttribute("aria-hidden", "false");
+}
+
+function closeConnectionModal() {
+  state.connectionModal.isOpen = false;
+  connectionModal.classList.remove("is-open");
+  connectionModal.setAttribute("aria-hidden", "true");
+}
+
+function handleConnectionFailure(error) {
+  state.message = error.message;
+  openConnectionModal(error.message);
+  renderStatus();
+}
+
 function openAuthModal(message = "") {
   state.auth.modalOpen = true;
+  closeConnectionModal();
   authFormMessage.textContent = message;
   authFormCopy.textContent = state.auth.configured
     ? "Apollo now requires a shared secret before the client can use the API."
@@ -650,13 +1081,61 @@ function closeAuthModal() {
   authModal.setAttribute("aria-hidden", "true");
 }
 
+function clearApolloData() {
+  state.libraryTracks = [];
+  state.playlists = [];
+  state.searchResults = [];
+  state.artistSearchResults = [];
+  state.playbackManualQueue = [];
+  state.playbackContextQueue = [];
+  state.playbackContextIndex = 0;
+  state.playbackAutoplayQueue = [];
+  state.playbackCurrentSource = "standalone";
+  searchResultCache.clear();
+  artistSearchCache.clear();
+  artistProfileCache.clear();
+  artistTracksCache.clear();
+  artistReleasesCache.clear();
+  playbackUrlCache.clear();
+  pendingPlaybackUrlCache.clear();
+  clearArtistBrowseState();
+  state.selectedTrackKey = null;
+  state.playbackTrackKey = null;
+  state.transientPlaybackTrack = null;
+  audioPlayer.pause();
+  audioPlayer.removeAttribute("src");
+  audioPlayer.load();
+  persistPlaybackState();
+  persistPlaybackQueue();
+}
+
+function handleServerEndpointChanged() {
+  clearAuthSession();
+  state.auth.enabled = false;
+  state.auth.configured = false;
+  state.auth.sessionTtlHours = 0;
+  clearApolloData();
+  updateAuthButton();
+  syncDiscordPresence();
+}
+
 function updateAuthButton() {
   authButton.hidden = !state.auth.enabled && !state.auth.token;
   authButton.textContent = state.auth.token ? "Sign out" : "Sign in";
 }
 
 async function refreshAuthStatus() {
-  const status = await requestJson("/api/auth/status", { skipAuth: true });
+  let status;
+  try {
+    status = await requestJson("/api/auth/status", { skipAuth: true });
+  } catch (error) {
+    if (isConnectionError(error)) {
+      updateAuthButton();
+      return false;
+    }
+    throw error;
+  }
+
   state.auth.enabled = Boolean(status.enabled);
   state.auth.configured = Boolean(status.configured);
   state.auth.sessionTtlHours = Number(status.sessionTtlHours) || 0;
@@ -711,14 +1190,7 @@ async function signOut() {
   }
 
   clearAuthSession();
-  state.libraryTracks = [];
-  state.playlists = [];
-  state.searchResults = [];
-  state.selectedTrackKey = null;
-  state.playbackTrackKey = null;
-  audioPlayer.pause();
-  audioPlayer.removeAttribute("src");
-  audioPlayer.load();
+  clearApolloData();
   updateAuthButton();
   syncDiscordPresence();
 
@@ -736,6 +1208,476 @@ function buildTrackKey(prefix, id) {
   return `${prefix}:${id}`;
 }
 
+function normaliseProviderIds(providerIds = {}) {
+  const nextProviderIds = {};
+
+  PROVIDER_ID_KEYS.forEach((key) => {
+    const value = providerIds?.[key];
+    nextProviderIds[key] = typeof value === "string" ? value.trim() : value ? String(value) : "";
+  });
+
+  return nextProviderIds;
+}
+
+function normaliseMetadataText(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+function getTrackNormalizedDuration(track) {
+  const value = Number(track?.normalizedDuration ?? track?.duration ?? 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function getTrackNormalizedText(track, normalizedKey, fallbackKey) {
+  return normaliseMetadataText(track?.[normalizedKey] || track?.[fallbackKey] || "");
+}
+
+function buildSearchCacheKey(query, options = {}) {
+  return JSON.stringify({
+    query: String(query || "").trim().toLowerCase(),
+    scope: String(options.scope || "all"),
+    provider: Array.isArray(options.providers)
+      ? options.providers.join(",")
+      : String(options.provider || ""),
+    includeLibraryResults: Boolean(state.settings.search.includeLibraryResults),
+    providers: getEnabledProviders(),
+    apiBase: state.apiBase
+  });
+}
+
+function readCachedSearchResult(query, options = {}) {
+  const cacheKey = buildSearchCacheKey(query, options);
+  const cached = searchResultCache.get(cacheKey);
+  return cached ? structuredClone(cached) : null;
+}
+
+function writeCachedSearchResult(query, result, options = {}) {
+  const cacheKey = buildSearchCacheKey(query, options);
+  searchResultCache.set(cacheKey, structuredClone(result));
+
+  if (searchResultCache.size <= 20) {
+    return;
+  }
+
+  const oldestKey = searchResultCache.keys().next().value;
+  if (oldestKey) {
+    searchResultCache.delete(oldestKey);
+  }
+}
+
+function normaliseArtist(artist = {}) {
+  return {
+    id: String(artist.id || "").trim(),
+    name: String(artist.name || "Unknown Artist").trim(),
+    sortName: String(artist.sortName || artist["sort-name"] || artist.name || "").trim(),
+    type: String(artist.type || "").trim(),
+    country: String(artist.country || "").trim(),
+    area: String(artist.area || "").trim(),
+    disambiguation: String(artist.disambiguation || "").trim(),
+    source: String(artist.source || "musicbrainz").trim(),
+    aliases: Array.isArray(artist.aliases) ? artist.aliases.filter(Boolean) : [],
+    genres: Array.isArray(artist.genres) ? artist.genres.filter(Boolean) : [],
+    links: Array.isArray(artist.links) ? artist.links.filter(Boolean) : [],
+    tags: Array.isArray(artist.tags) ? artist.tags.filter(Boolean) : [],
+    artwork: String(
+      artist.artwork
+      || artist.artworkUrl
+      || artist.image
+      || artist.imageUrl
+      || artist.thumbnail
+      || artist.thumb
+      || artist.avatar
+      || artist.photo
+      || ""
+    ).trim(),
+    lifeSpan: {
+      begin: String(artist.lifeSpan?.begin || "").trim(),
+      end: String(artist.lifeSpan?.end || "").trim(),
+      ended: Boolean(artist.lifeSpan?.ended)
+    }
+  };
+}
+
+function readCachedArtistSearchResult(query) {
+  const cacheKey = `${state.apiBase}::${String(query || "").trim().toLowerCase()}`;
+  const cached = artistSearchCache.get(cacheKey);
+  return cached ? structuredClone(cached) : null;
+}
+
+function writeCachedArtistSearchResult(query, result) {
+  const cacheKey = `${state.apiBase}::${String(query || "").trim().toLowerCase()}`;
+  artistSearchCache.set(cacheKey, structuredClone(result));
+
+  if (artistSearchCache.size <= 20) {
+    return;
+  }
+
+  const oldestKey = artistSearchCache.keys().next().value;
+  if (oldestKey) {
+    artistSearchCache.delete(oldestKey);
+  }
+}
+
+function getArtistBrowseSummary(artistId = state.artistBrowse?.id || "") {
+  if (!artistId) {
+    return null;
+  }
+
+  if (state.artistBrowse?.id === artistId) {
+    return state.artistBrowse;
+  }
+
+  const searchMatch = state.artistSearchResults.find((artist) => artist.id === artistId);
+  if (searchMatch) {
+    return searchMatch;
+  }
+
+  return artistProfileCache.get(artistId) || null;
+}
+
+function formatArtistSubtitle(artist) {
+  return [
+    artist?.type,
+    artist?.area || artist?.country,
+    artist?.disambiguation
+  ].filter(Boolean).join(" | ");
+}
+
+function clearArtistBrowseState() {
+  state.artistSearchResults = [];
+  state.artistBrowse = null;
+}
+
+function normaliseNavigationArtist(artist) {
+  if (!artist) {
+    return null;
+  }
+
+  const nextArtist = normaliseArtist(artist);
+  return nextArtist.id ? nextArtist : null;
+}
+
+function serialiseNavigationTracks(tracks = []) {
+  if (!Array.isArray(tracks)) {
+    return [];
+  }
+
+  return tracks.map((track) => serialiseTrack(track));
+}
+
+function serialiseNavigationArtists(artists = []) {
+  if (!Array.isArray(artists)) {
+    return [];
+  }
+
+  return artists.map((artist) => normaliseArtist(artist));
+}
+
+function createNavigationSnapshot() {
+  const hasCachedQueryState = Boolean(state.query);
+
+  return {
+    selectedPlaylistId: typeof state.selectedPlaylistId === "string" && state.selectedPlaylistId
+      ? state.selectedPlaylistId
+      : "all-tracks",
+    query: String(state.query || "").trim(),
+    artistBrowse: normaliseNavigationArtist(state.artistBrowse),
+    selectedTrackKey: typeof state.selectedTrackKey === "string" ? state.selectedTrackKey : null,
+    hasCachedQueryState,
+    searchResults: hasCachedQueryState ? serialiseNavigationTracks(state.searchResults) : [],
+    artistSearchResults: hasCachedQueryState ? serialiseNavigationArtists(state.artistSearchResults) : [],
+    message: hasCachedQueryState ? String(state.message || "") : "",
+    trackListScrollTop: Number(trackList?.scrollTop || 0),
+    playlistListScrollTop: Number(playlistList?.scrollTop || 0)
+  };
+}
+
+function normaliseNavigationSnapshot(snapshot = {}) {
+  return {
+    selectedPlaylistId: typeof snapshot?.selectedPlaylistId === "string" && snapshot.selectedPlaylistId
+      ? snapshot.selectedPlaylistId
+      : "all-tracks",
+    query: String(snapshot?.query || "").trim(),
+    artistBrowse: normaliseNavigationArtist(snapshot?.artistBrowse),
+    selectedTrackKey: typeof snapshot?.selectedTrackKey === "string" ? snapshot.selectedTrackKey : null,
+    hasCachedQueryState: Boolean(snapshot?.hasCachedQueryState),
+    searchResults: serialiseNavigationTracks(snapshot?.searchResults),
+    artistSearchResults: serialiseNavigationArtists(snapshot?.artistSearchResults),
+    message: String(snapshot?.message || ""),
+    trackListScrollTop: Math.max(0, Number(snapshot?.trackListScrollTop || 0)),
+    playlistListScrollTop: Math.max(0, Number(snapshot?.playlistListScrollTop || 0))
+  };
+}
+
+function navigationSnapshotsEqual(left, right) {
+  if (!left || !right) {
+    return false;
+  }
+
+  return left.selectedPlaylistId === right.selectedPlaylistId
+    && left.query === right.query
+    && left.selectedTrackKey === right.selectedTrackKey
+    && (left.artistBrowse?.id || "") === (right.artistBrowse?.id || "");
+}
+
+function shouldReplaceNavigationHistory(source, nextSnapshot) {
+  return source === "search-input"
+    && lastNavigationCommitSource === "search-input"
+    && Boolean(currentNavigationSnapshot?.query)
+    && Boolean(nextSnapshot?.query)
+    && !currentNavigationSnapshot?.artistBrowse
+    && !nextSnapshot?.artistBrowse
+    && (Date.now() - lastNavigationCommitAt) <= SEARCH_HISTORY_GROUP_WINDOW_MS;
+}
+
+function replaceCurrentNavigationHistoryState() {
+  if (isApplyingNavigationHistory || !currentNavigationSnapshot) {
+    return;
+  }
+
+  currentNavigationSnapshot = createNavigationSnapshot();
+  window.history.replaceState({
+    apolloNavigation: currentNavigationSnapshot
+  }, "");
+}
+
+function syncNavigationHistory(source, { replace = false } = {}) {
+  const nextSnapshot = createNavigationSnapshot();
+
+  if (isApplyingNavigationHistory) {
+    currentNavigationSnapshot = nextSnapshot;
+    return;
+  }
+
+  if (navigationSnapshotsEqual(nextSnapshot, currentNavigationSnapshot)) {
+    return;
+  }
+
+  const historyState = {
+    apolloNavigation: nextSnapshot
+  };
+
+  if (!currentNavigationSnapshot || replace || shouldReplaceNavigationHistory(source, nextSnapshot)) {
+    window.history.replaceState(historyState, "");
+  } else {
+    window.history.pushState(historyState, "");
+  }
+
+  currentNavigationSnapshot = nextSnapshot;
+  lastNavigationCommitSource = source;
+  lastNavigationCommitAt = Date.now();
+}
+
+function initialiseNavigationHistory() {
+  currentNavigationSnapshot = createNavigationSnapshot();
+  window.history.replaceState({
+    apolloNavigation: currentNavigationSnapshot
+  }, "");
+  lastNavigationCommitSource = "initial-load";
+  lastNavigationCommitAt = Date.now();
+}
+
+function restoreNavigationScrollPositions(snapshot) {
+  const nextTrackScrollTop = Math.max(0, Number(snapshot?.trackListScrollTop || 0));
+  const nextPlaylistScrollTop = Math.max(0, Number(snapshot?.playlistListScrollTop || 0));
+
+  requestAnimationFrame(() => {
+    if (trackList) {
+      trackList.scrollTop = nextTrackScrollTop;
+    }
+
+    if (playlistList) {
+      playlistList.scrollTop = nextPlaylistScrollTop;
+    }
+  });
+}
+
+function openPlaylistView(playlistId, { historySource = "" } = {}) {
+  replaceCurrentNavigationHistoryState();
+  state.selectedPlaylistId = playlistId;
+  state.query = "";
+  state.searchResults = [];
+  clearArtistBrowseState();
+  closeActiveMenu();
+  searchInput.value = "";
+  renderSearchField();
+  syncSelectedTrack();
+  persistPlaybackState();
+  render();
+
+  if (historySource) {
+    syncNavigationHistory(historySource);
+  }
+}
+
+function isNavigationBlockedByModal() {
+  return state.auth.modalOpen
+    || state.modal.isOpen
+    || state.trackDeleteModal.isOpen
+    || state.connectionModal.isOpen
+    || state.settingsModalOpen
+    || state.discordInvite.isOpen;
+}
+
+async function applyNavigationSnapshot(snapshot) {
+  const nextSnapshot = normaliseNavigationSnapshot(snapshot);
+
+  isApplyingNavigationHistory = true;
+  clearTimeout(state.searchTimer);
+  closeActiveMenu();
+
+  try {
+    state.selectedPlaylistId = nextSnapshot.selectedPlaylistId;
+    state.query = nextSnapshot.query;
+    state.selectedTrackKey = nextSnapshot.selectedTrackKey;
+    searchInput.value = nextSnapshot.query;
+    renderSearchField();
+
+    if (!nextSnapshot.query) {
+      abortPendingSearchRequest();
+      abortPendingArtistBrowseRequest();
+      state.searchResults = [];
+      state.message = state.isConnected ? "" : state.message;
+      clearArtistBrowseState();
+      syncSelectedTrack();
+      persistPlaybackState();
+      render();
+      restoreNavigationScrollPositions(nextSnapshot);
+      return;
+    }
+
+    if (nextSnapshot.hasCachedQueryState) {
+      abortPendingSearchRequest();
+      abortPendingArtistBrowseRequest();
+      state.searchResults = serialiseNavigationTracks(nextSnapshot.searchResults);
+      state.artistSearchResults = serialiseNavigationArtists(nextSnapshot.artistSearchResults);
+      state.artistBrowse = normaliseNavigationArtist(nextSnapshot.artistBrowse);
+      state.message = nextSnapshot.message || (state.isConnected ? "" : state.message);
+      state.isLoading = false;
+      syncSelectedTrack();
+      prefetchPlaybackUrl(getSelectedTrack());
+      persistPlaybackState();
+      render();
+      restoreNavigationScrollPositions(nextSnapshot);
+      return;
+    }
+
+    await runSearch();
+
+    if (nextSnapshot.artistBrowse?.id) {
+      await beginArtistBrowse(nextSnapshot.artistBrowse);
+    }
+
+    state.selectedTrackKey = nextSnapshot.selectedTrackKey;
+    syncSelectedTrack();
+    persistPlaybackState();
+    render();
+    restoreNavigationScrollPositions(nextSnapshot);
+  } finally {
+    currentNavigationSnapshot = createNavigationSnapshot();
+    lastNavigationCommitSource = "history";
+    lastNavigationCommitAt = Date.now();
+    isApplyingNavigationHistory = false;
+  }
+}
+
+function requestHistoryNavigation(direction) {
+  if (isNavigationBlockedByModal()) {
+    return;
+  }
+
+  const now = Date.now();
+  if (
+    direction === lastNavigationInputDirection
+    && (now - lastNavigationInputAt) <= NAVIGATION_INPUT_DEDUPE_MS
+  ) {
+    return;
+  }
+
+  lastNavigationInputDirection = direction;
+  lastNavigationInputAt = now;
+  replaceCurrentNavigationHistoryState();
+
+  if (direction < 0) {
+    window.history.back();
+    return;
+  }
+
+  window.history.forward();
+}
+
+function handleNavigationMouseButton(event) {
+  if (event.button !== 3 && event.button !== 4) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  requestHistoryNavigation(event.button === 3 ? -1 : 1);
+}
+
+function hasMatchingProviderIds(leftTrack, rightTrack) {
+  const leftProviderIds = normaliseProviderIds(leftTrack?.providerIds);
+  const rightProviderIds = normaliseProviderIds(rightTrack?.providerIds);
+
+  return PROVIDER_ID_KEYS.some((key) => {
+    const leftValue = normaliseMetadataText(leftProviderIds[key]);
+    const rightValue = normaliseMetadataText(rightProviderIds[key]);
+    return Boolean(leftValue && rightValue && leftValue === rightValue);
+  });
+}
+
+function hasMatchingNormalizedMetadata(leftTrack, rightTrack) {
+  const leftTitle = getTrackNormalizedText(leftTrack, "normalizedTitle", "title");
+  const rightTitle = getTrackNormalizedText(rightTrack, "normalizedTitle", "title");
+  const leftArtist = getTrackNormalizedText(leftTrack, "normalizedArtist", "artist");
+  const rightArtist = getTrackNormalizedText(rightTrack, "normalizedArtist", "artist");
+
+  if (!leftTitle || !rightTitle || !leftArtist || !rightArtist) {
+    return false;
+  }
+
+  if (leftTitle !== rightTitle || leftArtist !== rightArtist) {
+    return false;
+  }
+
+  const leftDuration = getTrackNormalizedDuration(leftTrack);
+  const rightDuration = getTrackNormalizedDuration(rightTrack);
+  if (leftDuration && rightDuration && Math.abs(leftDuration - rightDuration) > 3) {
+    return false;
+  }
+
+  return true;
+}
+
+function findLibraryMatch(track) {
+  if (!track) {
+    return null;
+  }
+
+  const libraryTrackId = track.trackId || (track.provider === "library" ? track.id : "");
+  if (libraryTrackId) {
+    return state.libraryTracks.find((candidate) => candidate.trackId === libraryTrackId) || null;
+  }
+
+  return state.libraryTracks.find((candidate) => {
+    return hasMatchingProviderIds(track, candidate) || hasMatchingNormalizedMetadata(track, candidate);
+  }) || null;
+}
+
+function resolveTrackLibraryId(track) {
+  return findLibraryMatch(track)?.trackId || "";
+}
+
+function isFallbackTrack(track) {
+  return Boolean(
+    track?.requestedProvider &&
+    track.requestedProvider !== track.provider
+  ) || String(track?.metadataSource || "").includes("fallback");
+}
+
 function serialiseTrack(track) {
   return {
     key: track.key,
@@ -746,11 +1688,116 @@ function serialiseTrack(track) {
     album: track.album || "",
     duration: track.duration || null,
     artwork: track.artwork || "",
-    providerIds: track.providerIds || {},
+    providerIds: normaliseProviderIds(track.providerIds),
     provider: track.provider || "remote",
     resultSource: track.resultSource || "remote",
     externalUrl: track.externalUrl || "",
-    downloadTarget: track.downloadTarget || ""
+    downloadTarget: track.downloadTarget || "",
+    normalizedTitle: track.normalizedTitle || getTrackNormalizedText(track, "normalizedTitle", "title"),
+    normalizedArtist: track.normalizedArtist || getTrackNormalizedText(track, "normalizedArtist", "artist"),
+    normalizedAlbum: track.normalizedAlbum || getTrackNormalizedText(track, "normalizedAlbum", "album"),
+    normalizedDuration: getTrackNormalizedDuration(track) || null,
+    metadataSource: track.metadataSource || track.provider || "remote",
+    requestedProvider: track.requestedProvider || ""
+  };
+}
+
+function nextQueueEntryId() {
+  queueEntryIdCounter += 1;
+  return `queue-${Date.now()}-${queueEntryIdCounter}`;
+}
+
+function restoreTrackList(tracks) {
+  if (!Array.isArray(tracks)) {
+    return [];
+  }
+
+  return tracks
+    .map((track) => {
+      try {
+        return serialiseTrack(track);
+      } catch {
+        return null;
+      }
+    })
+    .filter((track) => Boolean(track?.key));
+}
+
+function createQueueEntry(track, entryId = "") {
+  try {
+    const serialisedTrack = serialiseTrack(track);
+    if (!serialisedTrack?.key) {
+      return null;
+    }
+
+    return {
+      id: entryId || nextQueueEntryId(),
+      track: serialisedTrack
+    };
+  } catch {
+    return null;
+  }
+}
+
+function restoreQueueEntries(entries) {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+
+  return entries
+    .map((entry) => {
+      if (entry?.track) {
+        return createQueueEntry(entry.track, String(entry.id || ""));
+      }
+
+      return createQueueEntry(entry);
+    })
+    .filter(Boolean);
+}
+
+function resolveContextIndex(queue, contextIndex, playbackTrackKey = null) {
+  if (!queue.length) {
+    return -1;
+  }
+
+  const numericIndex = Number(contextIndex);
+  if (Number.isInteger(numericIndex) && numericIndex >= 0 && numericIndex < queue.length) {
+    return numericIndex;
+  }
+
+  if (playbackTrackKey) {
+    const matchingIndex = queue.findIndex((track) => track.key === playbackTrackKey);
+    if (matchingIndex >= 0) {
+      return matchingIndex;
+    }
+  }
+
+  return 0;
+}
+
+function restorePersistedQueueState(savedQueue, savedState = {}) {
+  const legacyQueue = restoreTrackList(savedQueue);
+  if (Array.isArray(savedQueue)) {
+    return {
+      manualQueue: [],
+      contextQueue: legacyQueue,
+      contextIndex: resolveContextIndex(legacyQueue, savedState.playbackContextIndex ?? savedState.playbackQueueIndex, savedState.playbackTrackKey),
+      autoplayQueue: [],
+      currentSource: legacyQueue.length ? "context" : "standalone"
+    };
+  }
+
+  const contextQueue = restoreTrackList(savedQueue?.contextQueue);
+  return {
+    manualQueue: restoreQueueEntries(savedQueue?.manualQueue),
+    contextQueue,
+    contextIndex: resolveContextIndex(contextQueue, savedQueue?.contextIndex ?? savedState.playbackContextIndex, savedState.playbackTrackKey),
+    autoplayQueue: restoreQueueEntries(savedQueue?.autoplayQueue),
+    currentSource: ["context", "manual", "autoplay", "standalone"].includes(savedQueue?.currentSource)
+      ? savedQueue.currentSource
+      : contextQueue.length
+        ? "context"
+        : "standalone"
   };
 }
 
@@ -766,11 +1813,17 @@ function normaliseLibraryTrack(track) {
     album: track.album || "",
     duration: track.duration || null,
     artwork: track.artwork || "",
-    providerIds: track.providerIds || {},
+    providerIds: normaliseProviderIds(track.providerIds),
     provider: "library",
     resultSource: "library",
     externalUrl: track.externalUrl || `${state.apiBase}/stream/${trackId}`,
-    downloadTarget: track.downloadTarget || `${state.apiBase}/stream/${trackId}?download=1`
+    downloadTarget: track.downloadTarget || `${state.apiBase}/stream/${trackId}?download=1`,
+    normalizedTitle: track.normalizedTitle || getTrackNormalizedText(track, "normalizedTitle", "title"),
+    normalizedArtist: track.normalizedArtist || getTrackNormalizedText(track, "normalizedArtist", "artist"),
+    normalizedAlbum: track.normalizedAlbum || getTrackNormalizedText(track, "normalizedAlbum", "album"),
+    normalizedDuration: getTrackNormalizedDuration(track) || null,
+    metadataSource: track.metadataSource || "library",
+    requestedProvider: ""
   };
 }
 
@@ -784,16 +1837,22 @@ function normaliseRemoteTrack(track) {
     album: track.album || "",
     duration: track.duration || null,
     artwork: track.artwork || "",
-    providerIds: track.providerIds || {},
+    providerIds: normaliseProviderIds(track.providerIds),
     provider: track.provider || "remote",
     resultSource: "remote",
     externalUrl: track.externalUrl || "",
-    downloadTarget: track.downloadTarget || track.externalUrl || ""
+    downloadTarget: track.downloadTarget || track.externalUrl || "",
+    normalizedTitle: track.normalizedTitle || getTrackNormalizedText(track, "normalizedTitle", "title"),
+    normalizedArtist: track.normalizedArtist || getTrackNormalizedText(track, "normalizedArtist", "artist"),
+    normalizedAlbum: track.normalizedAlbum || getTrackNormalizedText(track, "normalizedAlbum", "album"),
+    normalizedDuration: getTrackNormalizedDuration(track) || null,
+    metadataSource: track.metadataSource || track.provider || "remote",
+    requestedProvider: track.requestedProvider || ""
   };
 }
 
 async function requestJson(path, options = {}) {
-  const { skipAuth = false, ...fetchOptions } = options;
+  const { skipAuth = false, suppressConnectionModal = false, ...fetchOptions } = options;
   const headers = new Headers(fetchOptions.headers || {});
   if (!(fetchOptions.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
@@ -802,10 +1861,37 @@ async function requestJson(path, options = {}) {
     headers.set("Authorization", getAuthorizationHeader());
   }
 
-  const response = await fetch(`${state.apiBase}${path}`, {
-    ...fetchOptions,
-    headers
-  });
+  let requestUrl = "";
+  try {
+    requestUrl = new URL(path, `${state.apiBase}/`).toString();
+  } catch (error) {
+    const connectionError = createConnectionError(buildConnectionFailureMessage(error), error);
+    if (!suppressConnectionModal) {
+      handleConnectionFailure(connectionError);
+    }
+    throw connectionError;
+  }
+
+  let response;
+  try {
+    response = await fetch(requestUrl, {
+      ...fetchOptions,
+      headers
+    });
+  } catch (error) {
+    if (isAbortError(error)) {
+      throw error;
+    }
+
+    const connectionError = createConnectionError(buildConnectionFailureMessage(error), error);
+    if (!suppressConnectionModal) {
+      handleConnectionFailure(connectionError);
+    }
+    throw connectionError;
+  }
+
+  state.isConnected = true;
+  closeConnectionModal();
 
   if (!response.ok) {
     let errorMessage = `Request failed with ${response.status}`;
@@ -851,6 +1937,12 @@ async function fetchAllTracks(query = "") {
 }
 
 async function fetchSearchResults(query) {
+  const trimmedQuery = String(query || "").trim();
+  const cachedResult = readCachedSearchResult(trimmedQuery);
+  if (cachedResult) {
+    return cachedResult;
+  }
+
   const enabledProviders = getEnabledProviders();
   const includeLibraryResults = state.settings.search.includeLibraryResults;
   const useAllProviders = enabledProviders.length === searchProviderOrder.length;
@@ -864,19 +1956,27 @@ async function fetchSearchResults(query) {
   }
 
   if (includeLibraryResults && useAllProviders) {
-    const payload = await requestJson(buildSearchRequestPath(query, "all", "all"));
+    const payload = await requestJson(
+      buildSearchRequestPath(trimmedQuery, "all", "all"),
+      createSearchRequestOptions()
+    );
     const libraryItems = (payload.library?.items || []).map(normaliseLibraryTrack);
     const remoteItems = (payload.remote?.items || []).map(normaliseRemoteTrack);
-    return {
+    const result = {
       tracks: [...libraryItems, ...remoteItems],
       warnings: [payload.library?.warning, payload.remote?.warning].filter(Boolean)
     };
+    writeCachedSearchResult(trimmedQuery, result);
+    return result;
   }
 
   const requests = [];
   if (includeLibraryResults) {
     requests.push(
-      requestJson(buildSearchRequestPath(query, "library", "all")).then((payload) => ({
+      requestJson(
+        buildSearchRequestPath(trimmedQuery, "library", "all"),
+        createSearchRequestOptions()
+      ).then((payload) => ({
         scope: "library",
         tracks: (payload.library?.items || []).map(normaliseLibraryTrack),
         warning: payload.library?.warning || ""
@@ -886,7 +1986,10 @@ async function fetchSearchResults(query) {
 
   if (enabledProviders.length) {
     requests.push(
-      requestJson(buildSearchRequestPath(query, "remote", remoteProviderParam)).then((payload) => ({
+      requestJson(
+        buildSearchRequestPath(trimmedQuery, "remote", remoteProviderParam),
+        createSearchRequestOptions()
+      ).then((payload) => ({
         scope: "remote",
         tracks: (payload.remote?.items || []).map(normaliseRemoteTrack),
         warning: payload.remote?.warning || ""
@@ -897,10 +2000,297 @@ async function fetchSearchResults(query) {
   const results = await Promise.all(requests);
   const libraryItems = results.find((result) => result.scope === "library")?.tracks || [];
   const remoteItems = dedupeTracks(results.find((result) => result.scope === "remote")?.tracks || []);
-  return {
+  const result = {
     tracks: [...libraryItems, ...remoteItems],
     warnings: Array.from(new Set(results.map((result) => result.warning).filter(Boolean)))
   };
+  writeCachedSearchResult(trimmedQuery, result);
+  return result;
+}
+
+async function fetchRemoteSearchResults(query, { signal } = {}) {
+  const trimmedQuery = String(query || "").trim();
+  const enabledProviders = getEnabledProviders();
+  if (!trimmedQuery || !enabledProviders.length) {
+    return {
+      tracks: [],
+      warnings: []
+    };
+  }
+
+  const useAllProviders = enabledProviders.length === searchProviderOrder.length;
+  const remoteProviderParam = useAllProviders ? "all" : enabledProviders.join(",");
+  const cachedResult = readCachedSearchResult(trimmedQuery, {
+    scope: "remote",
+    provider: remoteProviderParam,
+    providers: enabledProviders
+  });
+  if (cachedResult) {
+    return cachedResult;
+  }
+
+  const payload = await requestJson(
+    buildSearchRequestPath(trimmedQuery, "remote", remoteProviderParam),
+    createSearchRequestOptions({ signal })
+  );
+  const result = {
+    tracks: dedupeTracks((payload.remote?.items || []).map(normaliseRemoteTrack)),
+    warnings: [payload.remote?.warning].filter(Boolean)
+  };
+  writeCachedSearchResult(trimmedQuery, result, {
+    scope: "remote",
+    provider: remoteProviderParam,
+    providers: enabledProviders
+  });
+  return result;
+}
+
+async function fetchArtistSearchResults(query, { signal } = {}) {
+  const trimmedQuery = String(query || "").trim();
+  if (!trimmedQuery) {
+    return [];
+  }
+
+  const cachedResult = readCachedArtistSearchResult(trimmedQuery);
+  if (cachedResult) {
+    return cachedResult;
+  }
+
+  const payload = await requestJson(
+    `/api/artists?query=${encodeURIComponent(trimmedQuery)}&page=1&pageSize=6`,
+    { signal }
+  );
+  const result = (payload.items || []).map(normaliseArtist);
+  writeCachedArtistSearchResult(trimmedQuery, result);
+  return result;
+}
+
+async function fetchArtistProfile(artistId, { signal } = {}) {
+  if (artistProfileCache.has(artistId)) {
+    return artistProfileCache.get(artistId);
+  }
+
+  const profile = normaliseArtist(
+    await requestJson(`/api/artists/${encodeURIComponent(artistId)}`, { signal })
+  );
+  artistProfileCache.set(artistId, profile);
+  return profile;
+}
+
+async function fetchArtistTracks(artistId, { signal } = {}) {
+  if (artistTracksCache.has(artistId)) {
+    return artistTracksCache.get(artistId);
+  }
+
+  const payload = await requestJson(
+    `/api/artists/${encodeURIComponent(artistId)}/tracks?page=1&pageSize=50`,
+    { signal }
+  );
+  const tracks = dedupeTracks((payload.items || []).map(normaliseRemoteTrack));
+  artistTracksCache.set(artistId, tracks);
+  return tracks;
+}
+
+async function fetchArtistReleases(artistId, { signal } = {}) {
+  if (artistReleasesCache.has(artistId)) {
+    return artistReleasesCache.get(artistId);
+  }
+
+  const payload = await requestJson(
+    `/api/artists/${encodeURIComponent(artistId)}/releases?page=1&pageSize=6`,
+    { signal }
+  );
+  const releases = (payload.items || []).map((release) => ({
+    id: release.id || "",
+    title: release.title || "Untitled release",
+    primaryType: release.primaryType || "",
+    firstReleaseDate: release.firstReleaseDate || ""
+  }));
+  artistReleasesCache.set(artistId, releases);
+  return releases;
+}
+
+function abortPendingSearchRequest() {
+  activeSearchAbortController?.abort();
+  activeSearchAbortController = null;
+}
+
+function abortPendingArtistBrowseRequest() {
+  activeArtistBrowseAbortController?.abort();
+  activeArtistBrowseAbortController = null;
+}
+
+function isAbortError(error) {
+  return error?.name === "AbortError";
+}
+
+function isSearchRequestCurrent(requestId, query) {
+  return requestId === activeSearchRequestId
+    && query === String(state.query || "").trim();
+}
+
+function matchesTrackQuery(track, query) {
+  const normalizedQuery = normaliseMetadataText(query);
+  if (!normalizedQuery) {
+    return true;
+  }
+
+  return [
+    getTrackNormalizedText(track, "normalizedTitle", "title"),
+    getTrackNormalizedText(track, "normalizedArtist", "artist"),
+    getTrackNormalizedText(track, "normalizedAlbum", "album")
+  ].some((value) => value.includes(normalizedQuery));
+}
+
+function getLocalSearchResults(query) {
+  const trimmedQuery = String(query || "").trim();
+  if (!trimmedQuery || !state.settings.search.includeLibraryResults) {
+    return [];
+  }
+
+  return state.libraryTracks.filter((track) => matchesTrackQuery(track, trimmedQuery));
+}
+
+function buildSearchStatusMessage({ artistCount, libraryCount, remoteCount, warnings = [], remotePending = false }) {
+  const summary = [
+    `${artistCount} artists`,
+    `${libraryCount} library`,
+    remotePending ? "searching remote..." : `${remoteCount} remote`
+  ].join(" | ");
+
+  return warnings.length ? `${summary} | ${warnings.join(" ")}` : summary;
+}
+
+function getArtistArtwork(artist = {}, tracks = []) {
+  const candidates = [
+    artist.artwork,
+    artist.image,
+    artist.imageUrl,
+    artist.thumbnail,
+    artist.thumb,
+    artist.avatar,
+    artist.photo
+  ];
+
+  if (Array.isArray(tracks)) {
+    tracks.forEach((track) => {
+      candidates.push(track?.artwork);
+    });
+  }
+
+  return candidates.find((candidate) => typeof candidate === "string" && candidate.trim()) || "";
+}
+
+function getArtistInitials(name = "") {
+  const parts = String(name || "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2);
+
+  if (!parts.length) {
+    return "A";
+  }
+
+  return parts
+    .map((part) => part.charAt(0).toUpperCase())
+    .join("");
+}
+
+function renderArtistArtwork(artist, className, tracks = []) {
+  const artwork = getArtistArtwork(artist, tracks);
+  if (artwork) {
+    return `<img class="${className}" src="${escapeHtml(withAccessToken(artwork))}" alt="${escapeHtml(artist?.name || "Artist artwork")}">`;
+  }
+
+  return `<span class="${className} artist-artwork-fallback" aria-hidden="true">${escapeHtml(getArtistInitials(artist?.name))}</span>`;
+}
+
+async function beginArtistBrowse(artist, { historySource = "" } = {}) {
+  const nextArtist = normaliseArtist(artist);
+  if (!nextArtist.id) {
+    return;
+  }
+
+  if (historySource) {
+    replaceCurrentNavigationHistoryState();
+  }
+
+  const requestId = ++activeArtistBrowseRequestId;
+  abortPendingArtistBrowseRequest();
+  const abortController = new AbortController();
+  activeArtistBrowseAbortController = abortController;
+  state.artistBrowse = {
+    ...nextArtist,
+    isLoading: true,
+    error: ""
+  };
+  state.artistSearchResults = [];
+  state.searchResults = [];
+  state.isLoading = true;
+  state.message = `Loading songs by ${nextArtist.name}...`;
+  render();
+
+  if (historySource) {
+    syncNavigationHistory(historySource);
+  }
+
+  try {
+    const [profile, tracks, releases] = await Promise.all([
+      fetchArtistProfile(nextArtist.id, { signal: abortController.signal }),
+      fetchArtistTracks(nextArtist.id, { signal: abortController.signal }),
+      fetchArtistReleases(nextArtist.id, { signal: abortController.signal })
+    ]);
+
+    if (requestId !== activeArtistBrowseRequestId || state.artistBrowse?.id !== nextArtist.id) {
+      return;
+    }
+
+    state.artistBrowse = {
+      ...profile,
+      artwork: getArtistArtwork(profile, tracks),
+      releases,
+      isLoading: false,
+      error: ""
+    };
+    state.searchResults = tracks;
+    syncSelectedTrack();
+    prefetchPlaybackUrl(getSelectedTrack());
+    state.message = tracks.length
+      ? `${tracks.length} songs by ${profile.name}`
+      : `No songs found for ${profile.name}.`;
+    render();
+    replaceCurrentNavigationHistoryState();
+  } catch (error) {
+    if (isAbortError(error)) {
+      return;
+    }
+
+    if (requestId !== activeArtistBrowseRequestId || state.artistBrowse?.id !== nextArtist.id) {
+      return;
+    }
+
+    state.artistBrowse = {
+      ...nextArtist,
+      releases: [],
+      isLoading: false,
+      error: error.message
+    };
+    state.searchResults = [];
+    state.message = error.message;
+    render();
+    replaceCurrentNavigationHistoryState();
+  } finally {
+    if (activeArtistBrowseAbortController === abortController) {
+      activeArtistBrowseAbortController = null;
+    }
+
+    if (requestId === activeArtistBrowseRequestId && state.artistBrowse?.id === nextArtist.id) {
+      state.isLoading = false;
+      render();
+      replaceCurrentNavigationHistoryState();
+    }
+  }
 }
 
 function getVisibleTracks() {
@@ -920,7 +2310,8 @@ function getVisibleTracks() {
 }
 
 function getSelectedTrack() {
-  return getVisibleTracks().find((track) => track.key === state.selectedTrackKey) || null;
+  return getVisibleTracks().find((track) => track.key === state.selectedTrackKey)
+    || (state.transientPlaybackTrack?.key === state.selectedTrackKey ? state.transientPlaybackTrack : null);
 }
 
 function getTrackByKey(trackKey) {
@@ -932,7 +2323,11 @@ function getTrackByKey(trackKey) {
     state.searchResults,
     state.libraryTracks,
     ...state.playlists.map((playlist) => playlist.tracks),
-    Array.from(likedTracks.values())
+    state.playbackManualQueue.map((entry) => entry.track),
+    state.playbackContextQueue,
+    state.playbackAutoplayQueue.map((entry) => entry.track),
+    Array.from(likedTracks.values()),
+    state.transientPlaybackTrack ? [state.transientPlaybackTrack] : []
   ];
 
   for (const source of sources) {
@@ -947,6 +2342,724 @@ function getTrackByKey(trackKey) {
 
 function getPlaybackTrack() {
   return getTrackByKey(state.playbackTrackKey) || null;
+}
+
+function getPlaybackQueueSeed(track) {
+  const visibleTracks = getVisibleTracks();
+  if (visibleTracks.some((candidate) => candidate.key === track?.key)) {
+    return visibleTracks;
+  }
+
+  return track ? [track] : [];
+}
+
+function seedPlaybackQueues(track, queueTracks, mode = state.playbackQueueMode || "context") {
+  const contextQueue = restoreTrackList(queueTracks);
+  const fallbackQueue = contextQueue.length ? contextQueue : (track ? [serialiseTrack(track)] : []);
+  state.playbackManualQueue = [];
+  state.playbackAutoplayQueue = [];
+  state.playbackContextQueue = fallbackQueue;
+  state.playbackContextIndex = resolveContextIndex(
+    state.playbackContextQueue,
+    state.playbackContextQueue.findIndex((queueTrack) => queueTrack.key === track?.key),
+    track?.key || state.playbackTrackKey
+  );
+  state.playbackCurrentSource = state.playbackContextQueue.length ? "context" : "standalone";
+  state.playbackQueueMode = mode;
+  persistPlaybackQueue();
+}
+
+function ensurePlaybackQueue(track, { replace = false, queueTracks = null, mode = state.playbackQueueMode || "context" } = {}) {
+  if (!track?.key) {
+    state.playbackManualQueue = [];
+    state.playbackContextQueue = [];
+    state.playbackContextIndex = -1;
+    state.playbackAutoplayQueue = [];
+    state.playbackCurrentSource = "standalone";
+    state.playbackQueueMode = "context";
+    persistPlaybackQueue();
+    return;
+  }
+
+  if (Array.isArray(queueTracks)) {
+    seedPlaybackQueues(track, queueTracks, mode);
+    return;
+  }
+
+  if (replace) {
+    const queueSeed = mode === "radio" ? [track] : getPlaybackQueueSeed(track);
+    seedPlaybackQueues(track, queueSeed, mode);
+    return;
+  }
+
+  if (
+    !state.playbackManualQueue.length
+    && !state.playbackContextQueue.length
+    && !state.playbackAutoplayQueue.length
+  ) {
+    const queueSeed = mode === "radio" ? [track] : getPlaybackQueueSeed(track);
+    seedPlaybackQueues(track, queueSeed, mode);
+  }
+}
+
+function ensurePlaybackQueueFromCurrentTrack() {
+  if (
+    state.playbackManualQueue.length
+    || state.playbackContextQueue.length
+    || state.playbackAutoplayQueue.length
+  ) {
+    return getUpcomingQueueEntries();
+  }
+
+  const currentTrack = getPlaybackTrack() || getSelectedTrack();
+  if (!currentTrack) {
+    return [];
+  }
+
+  seedPlaybackQueues(currentTrack, getPlaybackQueueSeed(currentTrack), state.playbackQueueMode || "context");
+  return getUpcomingQueueEntries();
+}
+
+function getPlaybackQueueCursor() {
+  if (!state.playbackContextQueue.length) {
+    return -1;
+  }
+
+  const playbackIndex = state.playbackTrackKey
+    ? state.playbackContextQueue.findIndex((track) => track.key === state.playbackTrackKey)
+    : -1;
+
+  if (playbackIndex >= 0) {
+    state.playbackContextIndex = playbackIndex;
+    return playbackIndex;
+  }
+
+  state.playbackContextIndex = resolveContextIndex(
+    state.playbackContextQueue,
+    state.playbackContextIndex,
+    state.selectedTrackKey
+  );
+  return state.playbackContextIndex;
+}
+
+function getUpcomingQueueEntries() {
+  const contextIndex = getPlaybackQueueCursor();
+  const manualEntries = state.playbackManualQueue.map((entry) => ({
+    id: entry.id,
+    lane: "manual",
+    track: entry.track
+  }));
+  const contextEntries = state.playbackContextQueue
+    .slice(contextIndex >= 0 ? contextIndex + 1 : 0)
+    .map((track, offset) => ({
+      id: `context:${contextIndex >= 0 ? contextIndex + offset + 1 : offset}`,
+      lane: "context",
+      track,
+      contextIndex: contextIndex >= 0 ? contextIndex + offset + 1 : offset
+    }));
+  const autoplayEntries = state.playbackAutoplayQueue.map((entry) => ({
+    id: entry.id,
+    lane: "autoplay",
+    track: entry.track
+  }));
+
+  return [...manualEntries, ...contextEntries, ...autoplayEntries];
+}
+
+function getQueueEntryById(queueId) {
+  if (!queueId) {
+    return null;
+  }
+
+  return getUpcomingQueueEntries().find((entry) => entry.id === queueId) || null;
+}
+
+function getAdjacentQueueTrack(offset, wrap = false) {
+  const upcomingEntries = ensurePlaybackQueueFromCurrentTrack();
+  if (!upcomingEntries.length) {
+    if (!wrap || !state.playbackContextQueue.length) {
+      return null;
+    }
+
+    return {
+      ...{
+        id: "context:0",
+        lane: "context",
+        track: state.playbackContextQueue[0],
+        contextIndex: 0
+      }
+    };
+  }
+
+  if (offset < 0) {
+    const previousContextIndex = getPlaybackQueueCursor() - 1;
+    if (previousContextIndex < 0) {
+      return null;
+    }
+
+    return {
+      id: `context:${previousContextIndex}`,
+      lane: "context",
+      track: state.playbackContextQueue[previousContextIndex],
+      contextIndex: previousContextIndex
+    };
+  }
+
+  return upcomingEntries[0];
+}
+
+function getRandomQueueTrack() {
+  const pool = ensurePlaybackQueueFromCurrentTrack();
+  if (!pool.length) {
+    return null;
+  }
+
+  return pool[Math.floor(Math.random() * pool.length)] || null;
+}
+
+function commitQueueState({ message = "", renderApp = true } = {}) {
+  persistPlaybackQueue();
+  persistPlaybackState();
+
+  if (message) {
+    state.message = message;
+  }
+
+  if (renderApp) {
+    render();
+    return;
+  }
+
+  renderDetailPanel();
+  renderStatus();
+}
+
+function areTracksEquivalent(leftTrack, rightTrack) {
+  if (!leftTrack || !rightTrack) {
+    return false;
+  }
+
+  return leftTrack.key === rightTrack.key
+    || hasMatchingProviderIds(leftTrack, rightTrack)
+    || hasMatchingNormalizedMetadata(leftTrack, rightTrack);
+}
+
+function buildAutoplayQueries(track) {
+  const artist = String(track?.artist || "").trim();
+  const title = String(track?.title || "").trim();
+  const album = String(track?.album || "").trim();
+  const queries = [
+    artist && title ? `${artist} ${title}` : "",
+    artist && album ? `${artist} ${album}` : "",
+    artist,
+    title
+  ];
+
+  return Array.from(new Set(queries.filter((query) => query && query.length >= 2)));
+}
+
+function scoreAutoplayCandidate(seedTrack, candidate) {
+  if (
+    !candidate
+    || areTracksEquivalent(seedTrack, candidate)
+    || areTracksEquivalent(getPlaybackTrack(), candidate)
+    || getUpcomingQueueEntries().some((queueEntry) => areTracksEquivalent(queueEntry.track, candidate))
+  ) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  let score = 0;
+  const seedArtist = getTrackNormalizedText(seedTrack, "normalizedArtist", "artist");
+  const candidateArtist = getTrackNormalizedText(candidate, "normalizedArtist", "artist");
+  const seedAlbum = getTrackNormalizedText(seedTrack, "normalizedAlbum", "album");
+  const candidateAlbum = getTrackNormalizedText(candidate, "normalizedAlbum", "album");
+  const seedTitle = getTrackNormalizedText(seedTrack, "normalizedTitle", "title");
+  const candidateTitle = getTrackNormalizedText(candidate, "normalizedTitle", "title");
+
+  if (seedArtist && candidateArtist === seedArtist) {
+    score += 60;
+  }
+
+  if (seedAlbum && candidateAlbum === seedAlbum) {
+    score += 30;
+  }
+
+  if (candidate.resultSource === "library") {
+    score += 10;
+  }
+
+  if (candidate.provider === seedTrack.provider) {
+    score += 8;
+  }
+
+  if (candidateTitle && candidateTitle !== seedTitle) {
+    score += 6;
+  }
+
+  const durationDelta = Math.abs(getTrackNormalizedDuration(candidate) - getTrackNormalizedDuration(seedTrack));
+  if (durationDelta && durationDelta <= 12) {
+    score += 4;
+  }
+
+  return score;
+}
+
+async function maybeExtendAutoplayQueue(seedTrack = getPlaybackTrack()) {
+  if (state.playbackQueueMode !== "radio" || state.queueAutofillInFlight || !seedTrack?.key) {
+    return;
+  }
+
+  const remainingTracks = getUpcomingQueueEntries().length;
+  if (remainingTracks > 2) {
+    return;
+  }
+
+  const queries = buildAutoplayQueries(seedTrack).slice(0, 3);
+  if (!queries.length) {
+    return;
+  }
+
+  state.queueAutofillInFlight = true;
+
+  try {
+    const results = await Promise.all(queries.map((query) => fetchSearchResults(query)));
+    const candidates = dedupeTracks(results.flatMap((result) => result.tracks || []))
+      .map((candidate) => ({
+        candidate,
+        score: scoreAutoplayCandidate(seedTrack, candidate)
+      }))
+      .filter((entry) => Number.isFinite(entry.score) && entry.score > 0)
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 8)
+      .map((entry) => createQueueEntry(entry.candidate))
+      .filter(Boolean);
+
+    if (!candidates.length) {
+      return;
+    }
+
+    state.playbackAutoplayQueue = [...state.playbackAutoplayQueue, ...candidates];
+    persistPlaybackQueue();
+    persistPlaybackState();
+
+    if (state.activeDetailTab === "queue") {
+      renderDetailPanel();
+    }
+  } catch {
+    // Ignore recommendation fetch failures and leave the queue as-is.
+  } finally {
+    state.queueAutofillInFlight = false;
+  }
+}
+
+function addTrackToQueue(track) {
+  if (!track?.key) {
+    return;
+  }
+
+  const nextEntry = createQueueEntry(track);
+  if (!nextEntry) {
+    return;
+  }
+
+  state.playbackManualQueue = [...state.playbackManualQueue, nextEntry];
+  if (!state.playbackTrackKey && !state.playbackContextQueue.length) {
+    state.playbackQueueMode = "context";
+  }
+  commitQueueState({
+    message: `Queued ${track.title}.`
+  });
+}
+
+function setExplicitUpcomingQueue(queueEntries) {
+  state.playbackManualQueue = queueEntries
+    .map((entry) => createQueueEntry(entry.track, entry.lane === "context" ? "" : entry.id))
+    .filter(Boolean);
+  state.playbackAutoplayQueue = [];
+
+  if (state.playbackContextQueue.length && state.playbackContextIndex >= 0) {
+    state.playbackContextQueue = state.playbackContextQueue.slice(0, state.playbackContextIndex + 1);
+  } else if (!state.playbackTrackKey) {
+    state.playbackContextQueue = [];
+    state.playbackContextIndex = -1;
+  }
+}
+
+function moveQueueItem(queueId, toIndex) {
+  if (!queueId || !Number.isInteger(toIndex)) {
+    return;
+  }
+
+  const upcomingEntries = getUpcomingQueueEntries();
+  const fromIndex = upcomingEntries.findIndex((entry) => entry.id === queueId);
+  if (fromIndex < 0 || toIndex < 0 || toIndex > upcomingEntries.length) {
+    return;
+  }
+
+  const nextQueue = [...upcomingEntries];
+  const boundedInsertionIndex = Math.max(0, Math.min(toIndex, nextQueue.length));
+  const [movedTrack] = nextQueue.splice(fromIndex, 1);
+  const adjustedInsertionIndex = fromIndex < boundedInsertionIndex
+    ? boundedInsertionIndex - 1
+    : boundedInsertionIndex;
+
+  if (adjustedInsertionIndex === fromIndex) {
+    return;
+  }
+
+  nextQueue.splice(adjustedInsertionIndex, 0, movedTrack);
+  setExplicitUpcomingQueue(nextQueue);
+  commitQueueState({
+    renderApp: false
+  });
+}
+
+function removeQueueItem(queueId) {
+  const entry = getQueueEntryById(queueId);
+  if (!entry) {
+    return;
+  }
+
+  if (entry.lane === "manual") {
+    state.playbackManualQueue = state.playbackManualQueue.filter((queueEntry) => queueEntry.id !== entry.id);
+  } else if (entry.lane === "autoplay") {
+    state.playbackAutoplayQueue = state.playbackAutoplayQueue.filter((queueEntry) => queueEntry.id !== entry.id);
+  } else if (entry.lane === "context" && Number.isInteger(entry.contextIndex)) {
+    state.playbackContextQueue.splice(entry.contextIndex, 1);
+  }
+
+  commitQueueState({
+    message: `Removed ${entry.track.title} from the queue.`
+  });
+}
+
+function consumeQueueEntry(entry) {
+  if (!entry?.track) {
+    return null;
+  }
+
+  if (entry.lane === "manual") {
+    state.playbackManualQueue = state.playbackManualQueue.filter((queueEntry) => queueEntry.id !== entry.id);
+    state.playbackCurrentSource = "manual";
+    return entry.track;
+  }
+
+  if (entry.lane === "autoplay") {
+    state.playbackAutoplayQueue = state.playbackAutoplayQueue.filter((queueEntry) => queueEntry.id !== entry.id);
+    state.playbackCurrentSource = "autoplay";
+    return entry.track;
+  }
+
+  if (entry.lane === "context" && Number.isInteger(entry.contextIndex)) {
+    state.playbackContextIndex = entry.contextIndex;
+    state.playbackCurrentSource = "context";
+    return entry.track;
+  }
+
+  return entry.track;
+}
+
+function promoteQueueEntryToCurrent(entry) {
+  if (!entry?.track) {
+    return null;
+  }
+
+  if (entry.lane === "manual") {
+    state.playbackManualQueue = state.playbackManualQueue.filter((queueEntry) => queueEntry.id !== entry.id);
+    state.playbackCurrentSource = "manual";
+    return entry.track;
+  }
+
+  if (entry.lane === "autoplay") {
+    state.playbackAutoplayQueue = state.playbackAutoplayQueue.filter((queueEntry) => queueEntry.id !== entry.id);
+    state.playbackCurrentSource = "autoplay";
+    return entry.track;
+  }
+
+  if (entry.lane === "context" && Number.isInteger(entry.contextIndex)) {
+    state.playbackContextIndex = entry.contextIndex;
+    state.playbackCurrentSource = "context";
+    return entry.track;
+  }
+
+  return entry.track;
+}
+
+function createQueueMenu(queueEntry, isCurrent) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "track-menu-popover queue-menu-popover";
+  wrapper.innerHTML = `
+    <button class="row-menu-button" type="button" data-action="play">Play now</button>
+    ${isCurrent ? "" : '<button class="row-menu-button row-menu-button--danger" type="button" data-action="remove">Remove from queue</button>'}
+  `;
+
+  wrapper.querySelector('[data-action="play"]').addEventListener("click", () => {
+    closeActiveMenu();
+    const track = promoteQueueEntryToCurrent(queueEntry);
+    if (!track) {
+      return;
+    }
+
+    state.selectedTrackKey = track.key;
+    void playResolvedTrack(track, {
+      select: false,
+      preserveQueue: true
+    });
+  });
+
+  const removeButton = wrapper.querySelector('[data-action="remove"]');
+  if (removeButton) {
+    removeButton.addEventListener("click", () => {
+      closeActiveMenu();
+      removeQueueItem(queueEntry.id);
+    });
+  }
+
+  return wrapper;
+}
+
+function renderQueuePanel(panelBody) {
+  document.querySelectorAll(".queue-menu-popover--portal").forEach((menu) => menu.remove());
+  const currentTrack = getPlaybackTrack();
+  const upcomingEntries = state.playbackTrackKey ? ensurePlaybackQueueFromCurrentTrack() : getUpcomingQueueEntries();
+  const visibleEntries = [
+    ...(currentTrack ? [{
+      id: "current",
+      lane: "current",
+      track: currentTrack
+    }] : []),
+    ...upcomingEntries
+  ];
+
+  if (!visibleEntries.length) {
+    panelBody.innerHTML = `
+      <div class="queue-panel queue-panel--empty">
+        <p class="detail-meta">Queue</p>
+        <h3>Nothing queued yet.</h3>
+        <p class="detail-description">Start playback from a list or add tracks from the menu to build the queue.</p>
+      </div>
+    `;
+    return;
+  }
+
+  panelBody.innerHTML = `
+    <div class="queue-panel">
+      <div class="queue-header">
+        <p class="detail-meta">Queue</p>
+        <h3>${visibleEntries.length} song${visibleEntries.length === 1 ? "" : "s"} lined up</h3>
+        <p class="detail-description">${state.playbackQueueMode === "radio"
+          ? "This queue is in autoplay mode. Apollo will keep trying to append similar tracks as it runs low."
+          : "The current song stays separate from upcoming songs. Drag anything below it to set the exact order Apollo will follow next."}</p>
+      </div>
+      <div class="queue-list" role="list"></div>
+    </div>
+  `;
+
+  const queueList = panelBody.querySelector(".queue-list");
+  const dropPlaceholder = document.createElement("div");
+  let activeQueueDropIndex = -1;
+
+  const clearQueueDragState = () => {
+    activeQueueDragId = "";
+    activeQueueDropIndex = -1;
+    queueList.classList.remove("is-drag-active");
+    dropPlaceholder.remove();
+    queueList.querySelectorAll(".queue-row").forEach((queueRow) => {
+      queueRow.classList.remove("is-dragging");
+    });
+  };
+
+  const getQueueInsertionIndex = (clientY) => {
+    const rows = Array.from(queueList.querySelectorAll(".queue-row[data-order-index]"))
+      .filter((queueRow) => !queueRow.classList.contains("is-dragging"));
+
+    for (const queueRow of rows) {
+      const bounds = queueRow.getBoundingClientRect();
+      const queueIndex = Number(queueRow.dataset.orderIndex);
+      if (clientY < bounds.top + bounds.height / 2) {
+        return queueIndex;
+      }
+    }
+
+    return upcomingEntries.length;
+  };
+
+  const renderDropPlaceholder = (insertionIndex) => {
+    if (activeQueueDropIndex === insertionIndex && dropPlaceholder.isConnected) {
+      return;
+    }
+
+    activeQueueDropIndex = insertionIndex;
+    dropPlaceholder.className = "queue-drop-placeholder";
+    const draggingRow = queueList.querySelector(".queue-row.is-dragging");
+    const placeholderHeight = draggingRow?.getBoundingClientRect().height || 68;
+    dropPlaceholder.style.height = `${Math.max(placeholderHeight, 68)}px`;
+
+    const queueRows = Array.from(queueList.querySelectorAll(".queue-row[data-order-index]"))
+      .filter((queueRow) => !queueRow.classList.contains("is-dragging"));
+    const nextSibling = queueRows.find((queueRow) => Number(queueRow.dataset.orderIndex) >= insertionIndex);
+
+    if (nextSibling) {
+      queueList.insertBefore(dropPlaceholder, nextSibling);
+      return;
+    }
+
+    queueList.append(dropPlaceholder);
+  };
+
+  queueList.addEventListener("dragover", (event) => {
+    if (!activeQueueDragId) {
+      return;
+    }
+
+    event.preventDefault();
+    renderDropPlaceholder(getQueueInsertionIndex(event.clientY));
+  });
+
+  queueList.addEventListener("drop", (event) => {
+    if (!activeQueueDragId) {
+      return;
+    }
+
+    event.preventDefault();
+    const insertionIndex = activeQueueDropIndex >= 0 ? activeQueueDropIndex : getQueueInsertionIndex(event.clientY);
+    const draggedQueueId = activeQueueDragId;
+    clearQueueDragState();
+    moveQueueItem(draggedQueueId, insertionIndex);
+  });
+
+  queueList.addEventListener("dragleave", (event) => {
+    if (!event.relatedTarget || !queueList.contains(event.relatedTarget)) {
+      dropPlaceholder.remove();
+      activeQueueDropIndex = -1;
+    }
+  });
+
+  visibleEntries.forEach((queueEntry, visibleIndex) => {
+    const row = document.createElement("div");
+    const { track } = queueEntry;
+    const isCurrent = queueEntry.lane === "current";
+    const isSelected = track.key === state.selectedTrackKey;
+    const nextRowIndex = currentTrack ? 1 : 0;
+    const queueLabel = isCurrent
+      ? "Playing"
+      : visibleIndex === nextRowIndex
+        ? "Next"
+        : queueEntry.lane === "manual"
+          ? "Queued"
+          : queueEntry.lane === "autoplay"
+            ? "Autoplay"
+            : "From context";
+
+    row.className = `queue-row${isCurrent ? " is-current" : ""}${isSelected ? " is-selected" : ""}`;
+    if (!isCurrent) {
+      row.dataset.orderIndex = String(visibleIndex - (currentTrack ? 1 : 0));
+      row.dataset.queueId = queueEntry.id;
+    }
+    row.draggable = !isCurrent;
+    row.innerHTML = `
+      <button class="queue-play" type="button" aria-label="Play ${escapeHtml(track.title)}">
+        <span class="queue-play-art">${renderArtwork(track, "queue-play-art-image")}</span>
+        <span class="queue-play-overlay">${playGlyphIcon()}</span>
+      </button>
+      <button class="queue-main" type="button">
+        <span class="queue-copy">
+          <span class="queue-title-row">
+            <span class="queue-title">${escapeHtml(track.title)}</span>
+            ${isCurrent ? '<span class="queue-pill">Now</span>' : ""}
+          </span>
+          <span class="queue-subtitle">${escapeHtml(track.artist)}</span>
+        </span>
+        <span class="queue-meta">
+          <span>${queueLabel}</span>
+          <span>${formatDuration(getCachedDuration(track), "--:--")}</span>
+        </span>
+      </button>
+      <div class="queue-actions">
+        <button class="queue-remove-button" type="button" data-queue-action="remove" aria-label="Remove from queue" ${isCurrent ? "disabled" : ""}>${closeSmallIcon()}</button>
+      </div>
+    `;
+
+    row.addEventListener("dragstart", (event) => {
+      if (isCurrent) {
+        event.preventDefault();
+        return;
+      }
+
+      if (
+        event.target instanceof Element
+        && event.target.closest(".queue-remove-button, .track-menu-popover, .queue-menu-popover")
+      ) {
+        event.preventDefault();
+        return;
+      }
+
+      activeQueueDragId = queueEntry.id;
+      closeActiveMenu();
+      row.classList.add("is-dragging");
+      queueList.classList.add("is-drag-active");
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", queueEntry.id);
+      }
+    });
+
+    row.addEventListener("dragend", () => {
+      clearQueueDragState();
+    });
+
+    row.querySelector(".queue-play").addEventListener("click", () => {
+      state.selectedTrackKey = track.key;
+      closeActiveMenu();
+      const nextTrack = promoteQueueEntryToCurrent(queueEntry);
+      if (!nextTrack) {
+        return;
+      }
+
+      void playResolvedTrack(nextTrack, {
+        select: false,
+        preserveQueue: true
+      });
+    });
+
+    row.querySelector(".queue-main").addEventListener("click", () => {
+      state.selectedTrackKey = track.key;
+      closeActiveMenu();
+      persistPlaybackState();
+      render();
+    });
+
+    row.querySelector('[data-queue-action="remove"]').addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeActiveMenu();
+      removeQueueItem(queueEntry.id);
+    });
+
+    row.addEventListener("contextmenu", (event) => {
+      if (isCurrent) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      closeActiveMenu();
+      state.activeQueueMenuId = queueEntry.id;
+      state.activeQueueMenuAnchor = {
+        x: event.clientX,
+        y: event.clientY
+      };
+      renderDetailPanel();
+    });
+
+    if (!isCurrent && state.activeQueueMenuId === queueEntry.id) {
+      const menu = createQueueMenu(queueEntry, isCurrent);
+      menu.classList.add("queue-menu-popover--portal");
+      document.body.append(menu);
+      positionActiveMenu(row, menu, state.activeQueueMenuAnchor);
+    }
+
+    queueList.append(row);
+  });
 }
 
 function isTrackLiked(trackKey) {
@@ -1015,21 +3128,37 @@ function setStatusMessage(message = "") {
   renderStatus();
 }
 
-async function setQuery(query, { run = false } = {}) {
+function renderSearchField() {
+  const hasQuery = Boolean((searchInput.value || state.query).trim());
+  clearSearchButton.hidden = !hasQuery;
+}
+
+async function setQuery(query, { run = false, historySource = "", historyReplace = false } = {}) {
   state.query = String(query ?? "").trim();
   searchInput.value = state.query;
+  renderSearchField();
 
   if (run) {
-    await runSearch();
+    await runSearch({
+      historySource,
+      historyReplace
+    });
     return;
   }
 
   if (!state.query) {
     state.searchResults = [];
+    clearArtistBrowseState();
     syncSelectedTrack();
   }
 
   render();
+
+  if (historySource) {
+    syncNavigationHistory(historySource, {
+      replace: historyReplace
+    });
+  }
 }
 
 async function playTrack(trackOrKey, { autoplay = true } = {}) {
@@ -1042,7 +3171,10 @@ async function playTrack(trackOrKey, { autoplay = true } = {}) {
   selectTrack(track.key, { autoplay: false });
 
   if (autoplay) {
-    await playSelectedTrack();
+    await playResolvedTrack(track, {
+      select: false,
+      replaceQueue: true
+    });
   }
 
   return track;
@@ -1258,6 +3390,60 @@ function getCachedDuration(track) {
   return durationCache.get(track.key) ?? track.duration ?? null;
 }
 
+function getCachedPlaybackUrl(trackKey) {
+  const entry = playbackUrlCache.get(trackKey);
+  if (!entry) {
+    return "";
+  }
+
+  if (typeof entry === "string") {
+    return entry;
+  }
+
+  if (!entry.url) {
+    playbackUrlCache.delete(trackKey);
+    return "";
+  }
+
+  if (Number.isFinite(entry.expiresAt) && entry.expiresAt <= Date.now()) {
+    playbackUrlCache.delete(trackKey);
+    return "";
+  }
+
+  return entry.url;
+}
+
+function cachePlaybackUrl(trackKey, url, ttlMs = PLAYBACK_URL_CACHE_TTL_MS) {
+  if (!trackKey || !url) {
+    return url;
+  }
+
+  playbackUrlCache.set(trackKey, {
+    url,
+    expiresAt: Number.isFinite(ttlMs)
+      ? Date.now() + Math.max(0, ttlMs)
+      : Number.POSITIVE_INFINITY
+  });
+  return url;
+}
+
+function prefetchPlaybackUrl(track) {
+  if (!track?.key || track.provider === "library") {
+    return;
+  }
+
+  void resolvePlaybackUrl(track).catch(() => {});
+}
+
+function prefetchUpcomingPlayback(track) {
+  prefetchPlaybackUrl(track);
+
+  const nextEntry = getAdjacentQueueTrack(1, state.repeatMode === "all");
+  if (nextEntry?.track && nextEntry.track.key !== track?.key) {
+    prefetchPlaybackUrl(nextEntry.track);
+  }
+}
+
 function queueDurationProbe(track) {
   if (track.provider !== "library") {
     return;
@@ -1331,12 +3517,17 @@ function getEditablePlaylist(playlistId = state.selectedPlaylistId) {
 }
 
 function isTrackInPlaylist(playlistId, track) {
-  if (!playlistId || !track?.trackId) {
+  if (!playlistId) {
+    return false;
+  }
+
+  const resolvedTrackId = resolveTrackLibraryId(track);
+  if (!resolvedTrackId) {
     return false;
   }
 
   const playlist = getEditablePlaylist(playlistId);
-  return Boolean(playlist?.tracks.some((entry) => entry.trackId === track.trackId));
+  return Boolean(playlist?.tracks.some((entry) => entry.trackId === resolvedTrackId));
 }
 
 function getEnabledProviders() {
@@ -1347,10 +3538,26 @@ function buildSearchRequestPath(query, scope, provider, pageSize = 24) {
   return `/api/search?query=${encodeURIComponent(query)}&scope=${encodeURIComponent(scope)}&provider=${encodeURIComponent(provider)}&page=1&pageSize=${pageSize}`;
 }
 
+function createSearchRequestOptions(options = {}) {
+  return {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      "X-Client-Id": state.clientId
+    }
+  };
+}
+
 function dedupeTracks(tracks) {
   const unique = new Map();
   tracks.forEach((track) => {
-    if (!unique.has(track.key)) {
+    const existingTrack = unique.get(track.key);
+    if (!existingTrack) {
+      unique.set(track.key, track);
+      return;
+    }
+
+    if (isFallbackTrack(existingTrack) && !isFallbackTrack(track)) {
       unique.set(track.key, track);
     }
   });
@@ -1358,11 +3565,15 @@ function dedupeTracks(tracks) {
 }
 
 function canSaveTrackToApollo(track) {
-  return Boolean(track && track.resultSource !== "library");
+  return Boolean(track && track.resultSource !== "library" && !findLibraryMatch(track));
 }
 
 function getDiscordPresenceBridge() {
   return window.apolloDesktop?.discordPresence || null;
+}
+
+function getDiscordSocialBridge() {
+  return discordSocialBridge;
 }
 
 function getDiscordPresenceConfig() {
@@ -1377,29 +3588,584 @@ function getDiscordPresenceConfig() {
   };
 }
 
+function canInviteCurrentTrackOnDiscord() {
+  if (!state.settings.integrations.discord.enabled) {
+    return false;
+  }
+
+  if (!state.discordSocial.available || !state.discordSocial.authenticated || !state.discordSocial.ready) {
+    return false;
+  }
+
+  return Boolean(buildDiscordPlaybackPayload()?.joinSecret);
+}
+
+function renderDiscordSocialSettings() {
+  if (!settingsDiscordSocialStatus) {
+    return;
+  }
+
+  const showConnect = !state.discordSocial.authenticated && !state.discordSocial.authInProgress;
+  const showDisconnect = state.discordSocial.authenticated;
+
+  if (!state.discordSocial.available) {
+    settingsDiscordSocialStatus.textContent = "Discord Social SDK is unavailable in this build.";
+    settingsDiscordSocialConnect.hidden = true;
+    settingsDiscordSocialConnect.style.display = "none";
+    settingsDiscordSocialSignout.hidden = true;
+    settingsDiscordSocialSignout.style.display = "none";
+    return;
+  }
+
+  settingsDiscordSocialStatus.textContent = state.discordSocial.message
+    || "Discord chat invites require a one-time account connection.";
+  settingsDiscordSocialConnect.hidden = !showConnect;
+  settingsDiscordSocialConnect.style.display = showConnect ? "" : "none";
+  settingsDiscordSocialConnect.disabled = state.discordSocial.authInProgress;
+  settingsDiscordSocialConnect.textContent = state.discordSocial.authInProgress
+    ? "Authorizing..."
+    : "Connect Discord";
+  settingsDiscordSocialSignout.hidden = !showDisconnect;
+  settingsDiscordSocialSignout.style.display = showDisconnect ? "" : "none";
+  settingsDiscordSocialSignout.textContent = "Disconnect Info";
+}
+
+function isRemoteDiscordArtworkUrl(url) {
+  if (!url) {
+    return false;
+  }
+
+  try {
+    const resolvedUrl = new URL(url, state.apiBase);
+    const apiOrigin = new URL(state.apiBase).origin;
+    const hostname = resolvedUrl.hostname.toLowerCase();
+
+    if (!["http:", "https:"].includes(resolvedUrl.protocol)) {
+      return false;
+    }
+
+    if (resolvedUrl.origin === apiOrigin) {
+      return false;
+    }
+
+    if (["127.0.0.1", "localhost", "0.0.0.0", "::1"].includes(hostname)) {
+      return false;
+    }
+
+    return !resolvedUrl.searchParams.has("access_token");
+  } catch {
+    return false;
+  }
+}
+
+function isLocalOrPrivateHostname(hostname) {
+  const normalisedHost = String(hostname || "").trim().toLowerCase();
+  return LOCAL_DISCORD_HOSTNAMES.has(normalisedHost) || LOCAL_NETWORK_IPV4_PATTERN.test(normalisedHost);
+}
+
+function canUsePublicApolloLauncherUrl() {
+  try {
+    const apiUrl = new URL(state.apiBase);
+    return ["http:", "https:"].includes(apiUrl.protocol) && !isLocalOrPrivateHostname(apiUrl.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function appendApolloTrackParams(url, track, { includeArtwork = true, includeRemoteSources = true } = {}) {
+  url.searchParams.set("provider", track.provider || "remote");
+  url.searchParams.set("id", String(track.id || track.trackId || track.key));
+  url.searchParams.set("title", track.title || "Unknown Title");
+  url.searchParams.set("artist", track.artist || "Unknown Artist");
+
+  if (track.album) {
+    url.searchParams.set("album", track.album);
+  }
+
+  if (track.trackId) {
+    url.searchParams.set("trackId", String(track.trackId));
+  }
+
+  if (includeRemoteSources && track.externalUrl) {
+    url.searchParams.set("externalUrl", track.externalUrl);
+  }
+
+  if (includeRemoteSources && track.downloadTarget) {
+    url.searchParams.set("downloadTarget", track.downloadTarget);
+  }
+
+  if (includeArtwork && isRemoteDiscordArtworkUrl(track.artwork)) {
+    url.searchParams.set("artwork", track.artwork);
+  }
+}
+
+function appendApolloCompactLibraryParams(url, track) {
+  const trackId = getLibraryTrackId(track);
+  if (!trackId) {
+    return false;
+  }
+
+  url.searchParams.set("trackId", trackId);
+  return true;
+}
+
+function buildApolloLauncherUrl(targetUrl) {
+  if (!targetUrl) {
+    return "";
+  }
+
+  try {
+    const launcherUrl = new URL("/open-apollo", state.apiBase);
+    launcherUrl.searchParams.set("target", targetUrl);
+    const serialised = launcherUrl.toString();
+    return serialised.length <= 256 ? serialised : "";
+  } catch {
+    return "";
+  }
+}
+
+function buildApolloTrackLink(track) {
+  if (!track) {
+    return "";
+  }
+
+  const url = new URL(`apollo://${APOLLO_DEEP_LINK_ROUTE_PLAY}`);
+  const libraryTrackId = getLibraryTrackId(track);
+  if (libraryTrackId) {
+    appendApolloCompactLibraryParams(url, track);
+  } else {
+    appendApolloTrackParams(url, track);
+  }
+  const deepLinkUrl = url.toString();
+  if (libraryTrackId && canUsePublicApolloLauncherUrl()) {
+    return buildApolloLauncherUrl(deepLinkUrl);
+  }
+  return "";
+}
+
+function generateListenAlongSessionId() {
+  if (typeof crypto?.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+
+  return `apollo-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function getLibraryTrackId(track) {
+  return String(track?.trackId || (track?.resultSource === "library" ? track?.id : "") || resolveTrackLibraryId(track) || "").trim();
+}
+
+function resetPublishedListenAlongSession() {
+  listenAlongState.publishedSessionId = "";
+  listenAlongState.publishedTrackId = "";
+}
+
+function buildApolloListenAlongLink(sessionId) {
+  if (!sessionId) {
+    return "";
+  }
+
+  const url = new URL(`apollo://${APOLLO_DEEP_LINK_ROUTE_LISTEN}`);
+  url.searchParams.set("session", sessionId);
+  const compactUrl = url.toString();
+  return compactUrl.length <= 128 ? compactUrl : "";
+}
+
+function stopJoinedListenAlongSession() {
+  if (listenAlongState.pollHandle) {
+    window.clearInterval(listenAlongState.pollHandle);
+    listenAlongState.pollHandle = 0;
+  }
+
+  listenAlongState.joinedSessionId = "";
+  listenAlongState.joinedTrackId = "";
+  listenAlongState.pollInFlight = false;
+}
+
+function leaveJoinedListenAlongSession() {
+  if (!listenAlongState.joinedSessionId) {
+    return false;
+  }
+
+  stopJoinedListenAlongSession();
+  state.message = "Left listen along.";
+  renderStatus();
+  renderNowPlaying();
+  syncDiscordPresence();
+  return true;
+}
+
+function getActiveListenAlongSessionId(track) {
+  const trackId = getLibraryTrackId(track);
+  if (!trackId) {
+    return "";
+  }
+
+  if (listenAlongState.joinedSessionId && listenAlongState.joinedTrackId === trackId) {
+    return listenAlongState.joinedSessionId;
+  }
+
+  if (!listenAlongState.publishedSessionId) {
+    listenAlongState.publishedSessionId = generateListenAlongSessionId();
+  }
+
+  listenAlongState.publishedTrackId = trackId;
+  return listenAlongState.publishedSessionId;
+}
+
+async function fetchListenAlongSession(sessionId) {
+  return requestJson(`/api/listen-sessions/${encodeURIComponent(sessionId)}`);
+}
+
+async function publishListenAlongSession(track, payload, sessionId) {
+  if (!sessionId || listenAlongState.joinedSessionId) {
+    return;
+  }
+
+  const trackId = getLibraryTrackId(track);
+  if (!trackId) {
+    return;
+  }
+
+  await requestJson(`/api/listen-sessions/${encodeURIComponent(sessionId)}`, {
+    method: "PUT",
+    body: JSON.stringify({
+      trackId,
+      status: payload.status,
+      positionSeconds: payload.currentTime || 0,
+      durationSeconds: payload.duration || 0,
+      playbackRate: payload.playbackRate || 1,
+      capturedAt: Date.now()
+    })
+  });
+}
+
+async function clearPublishedListenAlongSession() {
+  const sessionId = listenAlongState.publishedSessionId;
+  resetPublishedListenAlongSession();
+  if (!sessionId) {
+    return;
+  }
+
+  try {
+    await requestJson(`/api/listen-sessions/${encodeURIComponent(sessionId)}`, {
+      method: "DELETE"
+    });
+  } catch {
+    // Ignore cleanup failures. Sessions expire server-side.
+  }
+}
+
+function unwrapApolloDeepLink(url) {
+  try {
+    const parsedUrl = new URL(url);
+    const routePath = `${parsedUrl.hostname}${parsedUrl.pathname}`;
+    if (!routePath.includes("_discord/join")) {
+      return url;
+    }
+
+    const secret = parsedUrl.searchParams.get("secret") || "";
+    return secret.startsWith("apollo://") ? secret : url;
+  } catch {
+    return url;
+  }
+}
+
+function parseApolloLink(url) {
+  try {
+    const parsedUrl = new URL(unwrapApolloDeepLink(url));
+    if (parsedUrl.protocol !== "apollo:") {
+      return null;
+    }
+
+    const route = parsedUrl.hostname || parsedUrl.pathname.replace(/^\//, "");
+    if (![APOLLO_DEEP_LINK_ROUTE_PLAY, APOLLO_DEEP_LINK_ROUTE_LISTEN].includes(route)) {
+      return null;
+    }
+
+    const sessionId = parsedUrl.searchParams.get("session") || "";
+    const trackIdParam = parsedUrl.searchParams.get("trackId") || parsedUrl.searchParams.get("id");
+    const provider = parsedUrl.searchParams.get("provider") || (trackIdParam ? "library" : "remote");
+    const title = parsedUrl.searchParams.get("title") || "Unknown Title";
+    const artist = parsedUrl.searchParams.get("artist") || "Unknown Artist";
+    const album = parsedUrl.searchParams.get("album") || "";
+    const artwork = parsedUrl.searchParams.get("artwork") || "";
+
+    if (route === APOLLO_DEEP_LINK_ROUTE_LISTEN && sessionId && !trackIdParam) {
+      return {
+        route,
+        sessionId,
+        track: null,
+        playback: null
+      };
+    }
+
+    if (provider === "library") {
+      const trackId = trackIdParam;
+      if (!trackId) {
+        return null;
+      }
+
+      return {
+        route,
+        sessionId,
+        track: normaliseLibraryTrack({
+          id: trackId,
+          trackId,
+          title,
+          artist,
+          album,
+          artwork
+        }),
+        playback: route === APOLLO_DEEP_LINK_ROUTE_LISTEN
+          ? {
+              status: parsedUrl.searchParams.get("status") === "playing" ? "playing" : "paused",
+              positionSeconds: Math.max(0, Number(parsedUrl.searchParams.get("positionMs") || 0) / 1000),
+              capturedAt: Math.max(0, Number(parsedUrl.searchParams.get("capturedAt") || 0)),
+              playbackRate: clampNumber(parsedUrl.searchParams.get("playbackRate"), 0.25, 4, 1)
+            }
+          : null
+      };
+    }
+
+    return {
+      route,
+      sessionId,
+      track: normaliseRemoteTrack({
+        id: parsedUrl.searchParams.get("id") || `${provider}:${title}:${artist}`,
+        provider,
+        title,
+        artist,
+        album,
+        artwork,
+        externalUrl: parsedUrl.searchParams.get("externalUrl") || "",
+        downloadTarget: parsedUrl.searchParams.get("downloadTarget") || parsedUrl.searchParams.get("externalUrl") || ""
+      }),
+      playback: null
+    };
+  } catch {
+    return null;
+  }
+}
+
+function getListenAlongStartTime(playback) {
+  if (!playback) {
+    return 0;
+  }
+
+  const basePosition = Math.max(0, Number(playback.positionSeconds) || 0);
+  if (playback.status !== "playing") {
+    return basePosition;
+  }
+
+  const capturedAt = Math.max(0, Number(playback.capturedAt) || 0);
+  if (!capturedAt) {
+    return basePosition;
+  }
+
+  const elapsedSeconds = Math.max(0, (Date.now() - capturedAt) / 1000);
+  return basePosition + elapsedSeconds * clampNumber(playback.playbackRate, 0.25, 4, 1);
+}
+
+async function applyListenAlongSessionSnapshot(session, { initial = false } = {}) {
+  const sessionTrackId = getLibraryTrackId(session);
+  if (!sessionTrackId) {
+    return false;
+  }
+
+  const track = normaliseLibraryTrack({
+    id: sessionTrackId,
+    trackId: sessionTrackId,
+    title: session.title || "Unknown Title",
+    artist: session.artist || "Unknown Artist",
+    album: session.album || "",
+    artwork: session.artwork || ""
+  });
+  const currentTrack = getPlaybackTrack();
+  const currentTrackId = getLibraryTrackId(currentTrack);
+  const needsTrackChange = currentTrackId !== sessionTrackId;
+
+  if (needsTrackChange) {
+    const didStartPlayback = await playResolvedTrack(track, {
+      queueTracks: [track],
+      preserveListenAlong: true
+    });
+    if (!didStartPlayback) {
+      return false;
+    }
+  }
+
+  const playback = {
+    status: session.status === "playing" ? "playing" : "paused",
+    positionSeconds: Math.max(0, Number(session.positionSeconds) || 0),
+    capturedAt: Math.max(0, Number(session.capturedAt) || 0),
+    playbackRate: clampNumber(session.playbackRate, 0.25, 4, 1)
+  };
+  const duration = audioPlayer.duration || getCachedDuration(track) || Number(session.durationSeconds) || Number.MAX_SAFE_INTEGER;
+  const targetTime = clampNumber(getListenAlongStartTime(playback), 0, duration, 0);
+  const driftSeconds = Math.abs((audioPlayer.currentTime || 0) - targetTime);
+  if (needsTrackChange || driftSeconds > DISCORD_LISTEN_SESSION_RESYNC_THRESHOLD_SECONDS) {
+    audioPlayer.currentTime = targetTime;
+  }
+
+  if (playback.status === "playing") {
+    try {
+      await audioPlayer.play();
+    } catch {
+      // Ignore autoplay/promise failures and keep the joined session active.
+    }
+  } else {
+    audioPlayer.pause();
+  }
+
+  listenAlongState.joinedTrackId = sessionTrackId;
+
+  if (initial) {
+    state.message = playback.status === "playing"
+      ? `Joined ${track.title} at ${formatDuration(targetTime)}.`
+      : `Opened ${track.title} from Discord.`;
+    render();
+  }
+
+  return true;
+}
+
+async function refreshJoinedListenAlongSession() {
+  if (!listenAlongState.joinedSessionId || listenAlongState.pollInFlight) {
+    return;
+  }
+
+  listenAlongState.pollInFlight = true;
+
+  try {
+    const session = await fetchListenAlongSession(listenAlongState.joinedSessionId);
+    if (!session?.trackId) {
+      stopJoinedListenAlongSession();
+      return;
+    }
+
+    await applyListenAlongSessionSnapshot(session);
+  } catch (error) {
+    if (/404/i.test(String(error?.message || ""))) {
+      stopJoinedListenAlongSession();
+      state.message = "The listen along session ended.";
+      renderStatus();
+    }
+  } finally {
+    listenAlongState.pollInFlight = false;
+  }
+}
+
+function startJoinedListenAlongPolling(sessionId) {
+  stopJoinedListenAlongSession();
+  listenAlongState.joinedSessionId = sessionId;
+  listenAlongState.pollHandle = window.setInterval(() => {
+    void refreshJoinedListenAlongSession();
+  }, DISCORD_LISTEN_SESSION_POLL_MS);
+}
+
+async function joinApolloListenAlong(track, playback, sessionId = "") {
+  await clearPublishedListenAlongSession();
+
+  if (sessionId) {
+    const session = await fetchListenAlongSession(sessionId);
+    const joined = await applyListenAlongSessionSnapshot(session, { initial: true });
+    if (joined) {
+      startJoinedListenAlongPolling(sessionId);
+    }
+    return;
+  }
+
+  const didStartPlayback = await playResolvedTrack(track, {
+    queueTracks: [track],
+    preserveListenAlong: true
+  });
+  if (!didStartPlayback) {
+    return;
+  }
+
+  const duration = audioPlayer.duration || getCachedDuration(track) || Number.MAX_SAFE_INTEGER;
+  const targetTime = clampNumber(getListenAlongStartTime(playback), 0, duration, 0);
+  audioPlayer.currentTime = targetTime;
+
+  if (playback?.status !== "playing") {
+    audioPlayer.pause();
+  }
+
+  state.message = playback?.status === "playing"
+    ? `Joined ${track.title} at ${formatDuration(targetTime)}.`
+    : `Opened ${track.title} from Discord.`;
+  render();
+}
+
+async function handleApolloDeepLink(url) {
+  const action = parseApolloLink(url);
+  if (!action) {
+    return;
+  }
+
+  if (action.route === APOLLO_DEEP_LINK_ROUTE_LISTEN) {
+    await joinApolloListenAlong(action.track, action.playback, action.sessionId || "");
+    return;
+  }
+
+  if (!action.track) {
+    return;
+  }
+
+  await playResolvedTrack(action.track, {
+    queueTracks: [action.track]
+  });
+}
+
 function buildDiscordPlaybackPayload() {
   const currentTrack = getPlaybackTrack();
   if (!currentTrack) {
     return null;
   }
 
+  const libraryTrack = findLibraryMatch(currentTrack);
+  const libraryTrackId = getLibraryTrackId(currentTrack);
+  const artworkTrack = libraryTrack || currentTrack;
+  const artworkUrl = isRemoteDiscordArtworkUrl(artworkTrack.artwork)
+    ? artworkTrack.artwork
+    : isRemoteDiscordArtworkUrl(currentTrack.artwork)
+      ? currentTrack.artwork
+      : "";
+
   const resolvedDuration = audioPlayer.duration || getCachedDuration(currentTrack) || 0;
-  const status = state.isBuffering
-    ? "buffering"
-    : state.isPlaying && !audioPlayer.paused
+  const status = state.isPlaying && !audioPlayer.paused
       ? "playing"
       : "paused";
 
-  return {
+  const payload = {
     title: currentTrack.title,
     artist: currentTrack.artist,
     album: currentTrack.album,
-    provider: providerLabel(currentTrack.provider),
+    provider: libraryTrackId
+      ? "Local file"
+      : providerLabel(currentTrack.provider, currentTrack.requestedProvider),
+    artworkUrl,
+    buttonUrl: buildApolloTrackLink(currentTrack),
     status,
     currentTime: audioPlayer.currentTime || 0,
     duration: resolvedDuration,
     playbackRate: audioPlayer.playbackRate || 1
   };
+
+  if (libraryTrackId) {
+    const sessionId = getActiveListenAlongSessionId(currentTrack);
+    const joinSecret = buildApolloListenAlongLink(sessionId);
+    if (joinSecret) {
+      payload.partyId = `apollo-session:${sessionId}`;
+      payload.partySize = 1;
+      payload.partyMax = DISCORD_LISTEN_ALONG_PARTY_MAX;
+      payload.joinSecret = joinSecret;
+      payload.listenSessionId = sessionId;
+    }
+  }
+
+  return payload;
 }
 
 async function syncDiscordPresenceConfig() {
@@ -1422,31 +4188,44 @@ function syncDiscordPresence() {
   }
 
   if (!state.settings.integrations.discord.enabled) {
+    void clearPublishedListenAlongSession();
     bridge.clear();
     return;
   }
 
   const payload = buildDiscordPlaybackPayload();
   if (!payload) {
+    void clearPublishedListenAlongSession();
     bridge.clear();
     return;
+  }
+
+  if (payload.listenSessionId && getLibraryTrackId(getPlaybackTrack()) && !listenAlongState.joinedSessionId) {
+    void publishListenAlongSession(getPlaybackTrack(), payload, payload.listenSessionId);
+  } else if (!listenAlongState.joinedSessionId) {
+    void clearPublishedListenAlongSession();
   }
 
   bridge.updatePlayback(payload);
 }
 
 function applySettings() {
+  state.apiBase = buildApiBase(state.settings.connection);
   audioPlayer.preload = state.settings.audio.preloadMode;
   audioPlayer.volume = state.settings.audio.volume;
   audioPlayer.muted = state.settings.audio.muted;
   audioPlayer.playbackRate = state.settings.playback.playbackRate;
   volumeSlider.value = String(state.settings.audio.volume);
   volumeSlider.step = String(state.settings.audio.volumeStep);
+  syncRangeVisuals();
   void syncDiscordPresenceConfig();
   syncDiscordPresence();
 }
 
 function populateSettingsForm() {
+  settingsServerProtocol.value = state.settings.connection.protocol;
+  settingsServerHostname.value = state.settings.connection.hostname;
+  settingsServerPort.value = state.settings.connection.port;
   settingsAutoplaySelection.checked = state.settings.playback.autoplaySelection;
   settingsRestoreLastTrack.checked = state.settings.playback.restoreLastTrack;
   settingsPauseOnBlur.checked = state.settings.playback.pauseOnBlur;
@@ -1458,26 +4237,26 @@ function populateSettingsForm() {
   settingsVolumeStep.value = String(state.settings.audio.volumeStep);
   settingsPreloadMode.value = state.settings.audio.preloadMode;
   settingsIncludeLibrary.checked = state.settings.search.includeLibraryResults;
+  settingsProviderDeezer.checked = state.settings.search.providers.deezer;
   settingsProviderYoutube.checked = state.settings.search.providers.youtube;
   settingsProviderSpotify.checked = state.settings.search.providers.spotify;
   settingsProviderSoundcloud.checked = state.settings.search.providers.soundcloud;
+  settingsProviderItunes.checked = state.settings.search.providers.itunes;
   settingsSearchDelay.value = String(state.settings.search.liveSearchDelayMs);
   settingsAutoRefreshLibrary.checked = state.settings.downloads.autoRefreshLibrary;
   settingsDiscordEnabled.checked = state.settings.integrations.discord.enabled;
-  settingsDiscordClientId.value = state.settings.integrations.discord.clientId;
-  settingsDiscordLargeImageKey.value = state.settings.integrations.discord.largeImageKey;
-  settingsDiscordLargeImageText.value = state.settings.integrations.discord.largeImageText;
-  settingsDiscordSmallImagePlaying.value = state.settings.integrations.discord.smallImageKeyPlaying;
-  settingsDiscordSmallImagePaused.value = state.settings.integrations.discord.smallImageKeyPaused;
-  settingsDiscordSmallImageBuffering.value = state.settings.integrations.discord.smallImageKeyBuffering;
   settingsFormMessage.textContent = "";
+  syncRangeVisuals();
+  renderDiscordSocialSettings();
 }
 
 function saveCurrentSettingsForm() {
   const providers = {
+    deezer: settingsProviderDeezer.checked,
     youtube: settingsProviderYoutube.checked,
     spotify: settingsProviderSpotify.checked,
-    soundcloud: settingsProviderSoundcloud.checked
+    soundcloud: settingsProviderSoundcloud.checked,
+    itunes: settingsProviderItunes.checked
   };
 
   if (!Object.values(providers).some(Boolean)) {
@@ -1485,6 +4264,11 @@ function saveCurrentSettingsForm() {
   }
 
   return mergeSettings(DEFAULT_SETTINGS, {
+    connection: normaliseConnectionSettings({
+      protocol: settingsServerProtocol.value,
+      hostname: settingsServerHostname.value,
+      port: settingsServerPort.value
+    }),
     playback: {
       autoplaySelection: settingsAutoplaySelection.checked,
       restoreLastTrack: settingsRestoreLastTrack.checked,
@@ -1510,12 +4294,12 @@ function saveCurrentSettingsForm() {
     integrations: {
       discord: {
         enabled: settingsDiscordEnabled.checked,
-        clientId: settingsDiscordClientId.value,
-        largeImageKey: settingsDiscordLargeImageKey.value,
-        largeImageText: settingsDiscordLargeImageText.value,
-        smallImageKeyPlaying: settingsDiscordSmallImagePlaying.value,
-        smallImageKeyPaused: settingsDiscordSmallImagePaused.value,
-        smallImageKeyBuffering: settingsDiscordSmallImageBuffering.value
+        clientId: state.settings.integrations.discord.clientId,
+        largeImageKey: state.settings.integrations.discord.largeImageKey,
+        largeImageText: state.settings.integrations.discord.largeImageText,
+        smallImageKeyPlaying: state.settings.integrations.discord.smallImageKeyPlaying,
+        smallImageKeyPaused: state.settings.integrations.discord.smallImageKeyPaused,
+        smallImageKeyBuffering: state.settings.integrations.discord.smallImageKeyBuffering
       }
     }
   });
@@ -1526,13 +4310,114 @@ function openSettingsModal() {
   populateSettingsForm();
   settingsModal.classList.add("is-open");
   settingsModal.setAttribute("aria-hidden", "false");
-  setTimeout(() => settingsAutoplaySelection.focus(), 0);
+  setTimeout(() => settingsServerHostname.focus(), 0);
 }
 
 function closeSettingsModal() {
   state.settingsModalOpen = false;
   settingsModal.classList.remove("is-open");
   settingsModal.setAttribute("aria-hidden", "true");
+}
+
+async function retryApolloConnection() {
+  state.message = `Retrying ${state.apiBase}...`;
+  renderStatus();
+  await initialiseApolloClient();
+}
+
+function renderDiscordInviteModal() {
+  if (!discordInviteFriends) {
+    return;
+  }
+
+  discordInviteMessageInput.value = state.discordInvite.message;
+  discordInviteFormMessage.textContent = state.discordInvite.formMessage;
+  discordInviteSubmit.disabled = state.discordInvite.isSending || !state.discordInvite.selectedFriendId;
+  discordInviteSubmit.textContent = state.discordInvite.isSending ? "Sending..." : "Send invite";
+
+  if (state.discordInvite.isLoading) {
+    discordInviteFriends.innerHTML = '<p class="discord-friend-empty">Loading Discord friends...</p>';
+    return;
+  }
+
+  if (!state.discordInvite.friends.length) {
+    discordInviteFriends.innerHTML = '<p class="discord-friend-empty">No Discord friends are available for invites right now.</p>';
+    return;
+  }
+
+  discordInviteFriends.innerHTML = state.discordInvite.friends.map((friend) => `
+    <label class="discord-friend-row${friend.id === state.discordInvite.selectedFriendId ? " is-selected" : ""}">
+      <input
+        type="radio"
+        name="discord-invite-friend"
+        value="${escapeHtml(friend.id)}"
+        ${friend.id === state.discordInvite.selectedFriendId ? "checked" : ""}
+      >
+      <span class="discord-friend-copy">
+        <strong>${escapeHtml(friend.displayName || friend.username)}</strong>
+        <small>${escapeHtml(friend.status || "unknown")}${friend.playingApollo ? " | already on Apollo" : ""}</small>
+      </span>
+    </label>
+  `).join("");
+
+  discordInviteFriends.querySelectorAll('input[name="discord-invite-friend"]').forEach((input) => {
+    input.addEventListener("change", () => {
+      state.discordInvite.selectedFriendId = input.value;
+      renderDiscordInviteModal();
+    });
+  });
+}
+
+async function openDiscordInviteModal() {
+  if (!canInviteCurrentTrackOnDiscord()) {
+    state.message = "Discord invite requires a connected Discord account and a joinable track.";
+    renderStatus();
+    return;
+  }
+
+  state.discordInvite = createDiscordInviteState({
+    isOpen: true,
+    isLoading: true,
+    message: state.discordInvite.message || "Listen along on Apollo"
+  });
+  discordInviteModal.classList.add("is-open");
+  discordInviteModal.setAttribute("aria-hidden", "false");
+  renderDiscordInviteModal();
+
+  try {
+    const friends = await getDiscordSocialBridge()?.listFriends?.();
+    const availableFriends = Array.isArray(friends) ? friends : [];
+    state.discordInvite.friends = availableFriends;
+    state.discordInvite.selectedFriendId = availableFriends[0]?.id || "";
+    state.discordInvite.isLoading = false;
+    renderDiscordInviteModal();
+  } catch (error) {
+    state.discordInvite.isLoading = false;
+    state.discordInvite.formMessage = error?.message || "Unable to load Discord friends.";
+    renderDiscordInviteModal();
+  }
+}
+
+function closeDiscordInviteModal() {
+  state.discordInvite = createDiscordInviteState();
+  discordInviteModal.classList.remove("is-open");
+  discordInviteModal.setAttribute("aria-hidden", "true");
+}
+
+function applyDiscordSocialState(nextState = {}) {
+  state.discordSocial = {
+    ...state.discordSocial,
+    ...nextState
+  };
+
+  if (!state.discordSocial.authenticated && state.discordInvite.isOpen) {
+    closeDiscordInviteModal();
+  } else if (state.discordInvite.isOpen) {
+    renderDiscordInviteModal();
+  }
+
+  renderDiscordSocialSettings();
+  renderNowPlaying();
 }
 
 function saveVolumeSetting() {
@@ -1546,12 +4431,15 @@ function closeActiveMenu() {
   state.activeMenuAnchor = null;
   state.activePlaylistMenuId = null;
   state.activePlaylistMenuAnchor = null;
+  state.activeQueueMenuId = "";
+  state.activeQueueMenuAnchor = null;
   document.querySelectorAll(".track-menu-popover--portal").forEach((menu) => menu.remove());
   document.querySelectorAll(".playlist-menu-popover--portal").forEach((menu) => menu.remove());
+  document.querySelectorAll(".queue-menu-popover--portal").forEach((menu) => menu.remove());
 }
 
 function hasActiveMenu() {
-  return Boolean(state.activeMenuTrackKey || state.activePlaylistMenuId);
+  return Boolean(state.activeMenuTrackKey || state.activePlaylistMenuId || state.activeQueueMenuId);
 }
 
 function selectTrack(trackKey, { autoplay = false } = {}) {
@@ -1559,10 +4447,13 @@ function selectTrack(trackKey, { autoplay = false } = {}) {
   closeActiveMenu();
   persistPlaybackState();
   render();
+  const selectedTrack = getSelectedTrack();
   pluginHost?.emit("selection:changed", {
-    track: getSelectedTrack(),
+    track: selectedTrack,
     autoplay
   });
+
+  prefetchPlaybackUrl(selectedTrack);
 
   if (autoplay) {
     void playSelectedTrack();
@@ -1593,6 +4484,7 @@ async function refreshLibrary() {
       artworkUrl: playlist.artworkUrl || "",
       tracks: (playlist.tracks || []).map(normaliseLibraryTrack)
     }));
+    searchResultCache.clear();
     state.message = health?.status ? "" : "Apollo responded without a health status.";
 
     if (!state.query) {
@@ -1621,10 +4513,11 @@ async function refreshLibrary() {
     state.isConnected = false;
     if (error.code === "AUTH_REQUIRED") {
       state.message = error.message;
+    } else if (isConnectionError(error)) {
+      clearApolloData();
+      state.message = error.message;
     } else {
-      state.libraryTracks = [];
-      state.playlists = [];
-      state.selectedTrackKey = null;
+      clearApolloData();
       state.message = `Apollo unavailable at ${state.apiBase}. ${error.message}`;
     }
 
@@ -1638,46 +4531,160 @@ async function refreshLibrary() {
   }
 }
 
-async function runSearch() {
-  if (!state.query) {
+async function runSearch({ historySource = "", historyReplace = false } = {}) {
+  const query = String(state.query || "").trim();
+  const requestId = ++activeSearchRequestId;
+  abortPendingSearchRequest();
+  abortPendingArtistBrowseRequest();
+  state.artistBrowse = null;
+
+  if (!query) {
     state.searchResults = [];
+    state.artistSearchResults = [];
     state.message = state.isConnected ? "" : state.message;
     syncSelectedTrack();
     render();
+
+    if (historySource) {
+      syncNavigationHistory(historySource, {
+        replace: historyReplace
+      });
+    } else {
+      replaceCurrentNavigationHistoryState();
+    }
+
     pluginHost?.emit("search:cleared", {});
     return;
   }
 
+  const localTracks = getLocalSearchResults(query);
+  const searchWarnings = [];
+  let artistResults = [];
+  let remoteResults = [];
+  let remotePending = getEnabledProviders().length > 0;
+  let searchError = null;
+
+  const publishSearchProgress = () => {
+    if (!isSearchRequestCurrent(requestId, query)) {
+      return;
+    }
+
+    state.searchResults = dedupeTracks([...localTracks, ...remoteResults]);
+    state.artistSearchResults = artistResults;
+    state.message = buildSearchStatusMessage({
+      artistCount: artistResults.length,
+      libraryCount: localTracks.length,
+      remoteCount: remoteResults.length,
+      warnings: searchWarnings,
+      remotePending
+    });
+    syncSelectedTrack();
+    prefetchPlaybackUrl(getSelectedTrack());
+    render();
+    replaceCurrentNavigationHistoryState();
+  };
+
+  const abortController = new AbortController();
+  activeSearchAbortController = abortController;
   state.isLoading = true;
-  state.message = "Searching library and providers...";
+  state.searchResults = localTracks;
+  state.artistSearchResults = [];
+  state.message = buildSearchStatusMessage({
+    artistCount: 0,
+    libraryCount: localTracks.length,
+    remoteCount: 0,
+    remotePending
+  });
+  syncSelectedTrack();
+  prefetchPlaybackUrl(getSelectedTrack());
   render();
+
+  if (historySource) {
+    syncNavigationHistory(historySource, {
+      replace: historyReplace
+    });
+  } else {
+    replaceCurrentNavigationHistoryState();
+  }
+
   pluginHost?.emit("search:start", {
-    query: state.query
+    query
   });
 
   try {
-    const { tracks, warnings } = await fetchSearchResults(state.query);
-    state.searchResults = tracks;
-    const libraryCount = state.searchResults.filter((track) => track.resultSource === "library").length;
-    const remoteCount = state.searchResults.length - libraryCount;
-    const summary = `${libraryCount} library | ${remoteCount} remote`;
-    state.message = warnings.length ? `${summary} | ${warnings.join(" ")}` : summary;
-    syncSelectedTrack();
-    pluginHost?.emit("search:success", {
-      query: state.query,
-      tracks,
-      warnings
-    });
+    const artistTask = fetchArtistSearchResults(query, { signal: abortController.signal })
+      .then((artists) => {
+        if (!isSearchRequestCurrent(requestId, query)) {
+          return;
+        }
+
+        artistResults = artists;
+        publishSearchProgress();
+      })
+      .catch((error) => {
+        if (!isAbortError(error)) {
+          throw error;
+        }
+      });
+
+    const remoteTask = fetchRemoteSearchResults(query, { signal: abortController.signal })
+      .then(({ tracks, warnings }) => {
+        if (!isSearchRequestCurrent(requestId, query)) {
+          return;
+        }
+
+        remoteResults = tracks;
+        searchWarnings.splice(0, searchWarnings.length, ...warnings);
+        remotePending = false;
+        publishSearchProgress();
+      })
+      .catch((error) => {
+        if (isAbortError(error)) {
+          return;
+        }
+
+        if (!isSearchRequestCurrent(requestId, query)) {
+          return;
+        }
+
+        remotePending = false;
+        searchWarnings.splice(0, searchWarnings.length, error.message);
+        publishSearchProgress();
+      });
+
+    await Promise.all([artistTask, remoteTask]);
   } catch (error) {
-    state.searchResults = [];
-    state.message = error.message;
+    if (isAbortError(error) || !isSearchRequestCurrent(requestId, query)) {
+      return;
+    }
+
+    searchError = error;
+    if (!searchWarnings.includes(error.message)) {
+      searchWarnings.push(error.message);
+    }
+    publishSearchProgress();
     pluginHost?.emit("search:error", {
-      query: state.query,
+      query,
       error
     });
   } finally {
+    if (activeSearchAbortController === abortController) {
+      activeSearchAbortController = null;
+    }
+
+    if (!isSearchRequestCurrent(requestId, query)) {
+      return;
+    }
+
     state.isLoading = false;
-    render();
+    publishSearchProgress();
+    if (!searchError) {
+      pluginHost?.emit("search:success", {
+        query,
+        tracks: state.searchResults,
+        warnings: [...searchWarnings]
+      });
+    }
   }
 }
 
@@ -1754,7 +4761,7 @@ function openPlaylistModal({ initialTrackId = null, playlistId = null, mode = "c
     ? `<img src="${escapeHtml(withAccessToken(playlist.artworkUrl))}" alt="">`
     : noteIcon();
   playlistArtworkStatus.textContent = playlist?.artworkUrl
-    ? "Current artwork will stay until you replace or remove it."
+    ? "Current artwork remains until it is replaced or removed."
     : "No artwork selected.";
   playlistModal.classList.add("is-open");
   playlistModal.setAttribute("aria-hidden", "false");
@@ -1770,6 +4777,35 @@ function closePlaylistModal() {
   playlistArtworkInput.value = "";
   playlistModal.classList.remove("is-open");
   playlistModal.setAttribute("aria-hidden", "true");
+}
+
+function renderTrackDeleteModal() {
+  const track = state.trackDeleteModal.track;
+  trackDeleteCopy.textContent = track
+    ? `Delete "${track.title}" by ${track.artist} from Apollo?`
+    : "Delete this track from Apollo?";
+  trackDeleteMessage.textContent = state.trackDeleteModal.message
+    || "This removes the saved file from the Apollo server library.";
+  trackDeleteCancel.disabled = state.trackDeleteModal.isDeleting;
+  trackDeleteConfirm.disabled = state.trackDeleteModal.isDeleting;
+  trackDeleteConfirm.textContent = state.trackDeleteModal.isDeleting ? "Deleting..." : "Delete";
+}
+
+function openTrackDeleteModal(track) {
+  state.trackDeleteModal = createTrackDeleteModalState({
+    isOpen: true,
+    track: serialiseTrack(track)
+  });
+  trackDeleteModal.classList.add("is-open");
+  trackDeleteModal.setAttribute("aria-hidden", "false");
+  renderTrackDeleteModal();
+  setTimeout(() => trackDeleteConfirm.focus(), 0);
+}
+
+function closeTrackDeleteModal() {
+  state.trackDeleteModal = createTrackDeleteModalState();
+  trackDeleteModal.classList.remove("is-open");
+  trackDeleteModal.setAttribute("aria-hidden", "true");
 }
 
 async function createPlaylist(name, description = "", initialTrackId = null) {
@@ -1849,12 +4885,13 @@ function updatePlaylistArtworkUI() {
   }
 
   playlistArtworkStatus.textContent = artworkUrl
-    ? "Current artwork will stay until you replace or remove it."
+    ? "Current artwork remains until it is replaced or removed."
     : "No artwork selected.";
 }
 
 async function addTrackToPlaylist(playlistId, track) {
-  if (!track.trackId) {
+  const resolvedTrackId = resolveTrackLibraryId(track);
+  if (!resolvedTrackId) {
     state.message = "Only library tracks can be added to playlists right now.";
     render();
     return;
@@ -1862,7 +4899,7 @@ async function addTrackToPlaylist(playlistId, track) {
 
   await requestJson(`/api/playlists/${playlistId}/tracks`, {
     method: "POST",
-    body: JSON.stringify({ trackId: track.trackId })
+    body: JSON.stringify({ trackId: resolvedTrackId })
   });
 
   await refreshLibrary();
@@ -1871,11 +4908,12 @@ async function addTrackToPlaylist(playlistId, track) {
 }
 
 async function removeTrackFromPlaylist(playlistId, track) {
-  if (!track.trackId) {
+  const resolvedTrackId = resolveTrackLibraryId(track);
+  if (!resolvedTrackId) {
     return;
   }
 
-  await requestJson(`/api/playlists/${playlistId}/tracks/${track.trackId}`, {
+  await requestJson(`/api/playlists/${playlistId}/tracks/${resolvedTrackId}`, {
     method: "DELETE"
   });
 
@@ -1955,7 +4993,7 @@ async function downloadTrackToDevice(track) {
 
 async function downloadTrackToServer(track) {
   if (!canSaveTrackToApollo(track)) {
-    state.message = "This song is already in your Apollo library.";
+    state.message = "This song is already in the Apollo library.";
     renderStatus();
     return;
   }
@@ -1974,6 +5012,99 @@ async function downloadTrackToServer(track) {
       }, 4000);
     }
   } catch (error) {
+    state.message = error.message;
+    renderStatus();
+  }
+}
+
+function removeLikedEntriesForTrack(trackId) {
+  if (!trackId) {
+    return false;
+  }
+
+  let removed = false;
+
+  likedTracks.forEach((likedTrack, likedKey) => {
+    if ((likedTrack?.trackId || "") === trackId) {
+      likedTracks.delete(likedKey);
+      removed = true;
+    }
+  });
+
+  if (removed) {
+    persistLikedTracks();
+  }
+
+  return removed;
+}
+
+async function deleteTrackFromApollo(track, { closeModal = false } = {}) {
+  const resolvedTrackId = resolveTrackLibraryId(track);
+  if (!resolvedTrackId) {
+    state.message = "This song is not saved in Apollo.";
+    renderStatus();
+    return;
+  }
+
+  const libraryTrack = findLibraryMatch(track);
+  const playbackTrack = getPlaybackTrack();
+  const isDeletingPlaybackTrack = Boolean(
+    playbackTrack &&
+    playbackTrack.provider === "library" &&
+    resolveTrackLibraryId(playbackTrack) === resolvedTrackId
+  );
+
+  if (state.trackDeleteModal.isOpen) {
+    state.trackDeleteModal.isDeleting = true;
+    state.trackDeleteModal.message = "";
+    renderTrackDeleteModal();
+  }
+
+  try {
+    await requestJson(`/api/tracks/${encodeURIComponent(resolvedTrackId)}`, {
+      method: "DELETE"
+    });
+
+    if (isDeletingPlaybackTrack) {
+      audioPlayer.pause();
+      audioPlayer.removeAttribute("src");
+      audioPlayer.load();
+      state.playbackTrackKey = null;
+      state.transientPlaybackTrack = null;
+      state.isPlaying = false;
+      state.isBuffering = false;
+    }
+
+    if (libraryTrack?.key) {
+      durationCache.delete(libraryTrack.key);
+      playbackUrlCache.delete(libraryTrack.key);
+      pendingPlaybackUrlCache.delete(libraryTrack.key);
+      pendingDurationKeys.delete(libraryTrack.key);
+    }
+
+    removeLikedEntriesForTrack(resolvedTrackId);
+    state.searchResults = state.searchResults.filter(
+      (item) => !(item.provider === "library" && (item.trackId === resolvedTrackId || item.id === resolvedTrackId))
+    );
+
+    await refreshLibrary();
+    syncSelectedTrack();
+    persistPlaybackState();
+
+    if (closeModal) {
+      closeTrackDeleteModal();
+    }
+
+    state.message = `Deleted ${track.title} from Apollo.`;
+    render();
+  } catch (error) {
+    if (state.trackDeleteModal.isOpen) {
+      state.trackDeleteModal.isDeleting = false;
+      state.trackDeleteModal.message = error.message;
+      renderTrackDeleteModal();
+      return;
+    }
+
     state.message = error.message;
     renderStatus();
   }
@@ -2008,14 +5139,9 @@ function renderPlaylists() {
     `;
 
     row.querySelector(".library-item-main").addEventListener("click", () => {
-      state.selectedPlaylistId = playlist.id;
-      state.query = "";
-      state.searchResults = [];
-      closeActiveMenu();
-      searchInput.value = "";
-      syncSelectedTrack();
-      persistPlaybackState();
-      render();
+      openPlaylistView(playlist.id, {
+        historySource: "playlist"
+      });
     });
 
     if (isEditable) {
@@ -2061,8 +5187,10 @@ function renderPlaylists() {
 
 function createRowMenu(track) {
   const isLiked = isTrackLiked(track.key);
-  const isLibraryTrack = Boolean(track.trackId);
+  const resolvedTrackId = resolveTrackLibraryId(track);
+  const isLibraryTrack = Boolean(resolvedTrackId);
   const isRemoteTrack = !isLibraryTrack;
+  const canDeleteFromApollo = Boolean(resolvedTrackId && track.provider === "library");
   const editablePlaylist = getEditablePlaylist();
   const canToggleCurrentPlaylist = Boolean(editablePlaylist && isLibraryTrack);
   const isInCurrentPlaylist = canToggleCurrentPlaylist ? isTrackInPlaylist(editablePlaylist.id, track) : false;
@@ -2071,10 +5199,12 @@ function createRowMenu(track) {
   wrapper.className = "track-menu-popover";
   wrapper.innerHTML = `
     <button class="row-menu-button" type="button" data-action="play">Play now</button>
+    <button class="row-menu-button" type="button" data-action="queue">Add to queue</button>
     <button class="row-menu-button" type="button" data-action="like">${isLiked ? "Remove like" : "Like track"}</button>
     ${canToggleCurrentPlaylist ? `<button class="row-menu-button" type="button" data-action="toggle-current">${isInCurrentPlaylist ? "Remove from playlist" : "Add to playlist"}</button>` : ""}
     <button class="row-menu-button" type="button" data-action="create-playlist">${isLibraryTrack ? "Create playlist with track" : "Create playlist"}</button>
     ${isRemoteTrack ? '<button class="row-menu-button" type="button" data-action="download-server">Save to Apollo</button>' : ""}
+    ${canDeleteFromApollo ? '<button class="row-menu-button row-menu-button--danger" type="button" data-action="delete-server">Delete from Apollo</button>' : ""}
     <button class="row-menu-button" type="button" data-action="download-client">Download</button>
     <button class="row-menu-button" type="button" data-action="copy">Copy link</button>
   `;
@@ -2082,6 +5212,11 @@ function createRowMenu(track) {
   wrapper.querySelector('[data-action="play"]').addEventListener("click", () => {
     closeActiveMenu();
     selectTrack(track.key, { autoplay: true });
+  });
+
+  wrapper.querySelector('[data-action="queue"]').addEventListener("click", () => {
+    closeActiveMenu();
+    addTrackToQueue(track);
   });
 
   wrapper.querySelector('[data-action="like"]').addEventListener("click", () => {
@@ -2106,7 +5241,7 @@ function createRowMenu(track) {
     closeActiveMenu();
     openPlaylistModal({
       title: isLibraryTrack ? "Create playlist with track" : "Create playlist",
-      initialTrackId: isLibraryTrack ? track.trackId : null
+      initialTrackId: isLibraryTrack ? resolvedTrackId : null
     });
   });
 
@@ -2116,6 +5251,20 @@ function createRowMenu(track) {
       closeActiveMenu();
       void downloadTrackToServer(track);
       render();
+    });
+  }
+
+  const deleteServerButton = wrapper.querySelector('[data-action="delete-server"]');
+  if (deleteServerButton) {
+    deleteServerButton.addEventListener("click", (event) => {
+      closeActiveMenu();
+
+      if (event.shiftKey) {
+        void deleteTrackFromApollo(track);
+        return;
+      }
+
+      openTrackDeleteModal(track);
     });
   }
 
@@ -2143,14 +5292,9 @@ function createPlaylistMenu(playlist) {
   `;
 
   wrapper.querySelector('[data-action="open"]').addEventListener("click", () => {
-    state.selectedPlaylistId = playlist.id;
-    state.query = "";
-    state.searchResults = [];
-    searchInput.value = "";
-    closeActiveMenu();
-    syncSelectedTrack();
-    persistPlaybackState();
-    render();
+    openPlaylistView(playlist.id, {
+      historySource: "playlist"
+    });
   });
 
   wrapper.querySelector('[data-action="edit"]').addEventListener("click", () => {
@@ -2163,6 +5307,87 @@ function createPlaylistMenu(playlist) {
   });
 
   return wrapper;
+}
+
+function createArtistSearchSection() {
+  const section = document.createElement("section");
+  section.className = "artist-search-section";
+  section.innerHTML = `
+    <div class="artist-search-header">
+      <p class="panel-kicker">Artists</p>
+      <span class="artist-search-count">${state.artistSearchResults.length}</span>
+    </div>
+    <div class="artist-search-list"></div>
+  `;
+
+  const list = section.querySelector(".artist-search-list");
+  state.artistSearchResults.forEach((artist) => {
+    const row = document.createElement("div");
+    row.className = "library-item artist-search-item";
+    row.innerHTML = `
+      <button class="library-item-main" type="button">
+        <span class="item-art artist-search-mark">${renderArtistArtwork(artist, "item-art-image")}</span>
+        <span class="item-copy">
+          <p class="item-title">${escapeHtml(artist.name)}</p>
+          <p class="item-subtitle">${escapeHtml(formatArtistSubtitle(artist) || "Open artist songs")}</p>
+        </span>
+      </button>
+      <span class="library-item-menu-spacer" aria-hidden="true"></span>
+    `;
+
+    row.querySelector(".library-item-main").addEventListener("click", () => {
+      void beginArtistBrowse(artist, {
+        historySource: "artist-browse"
+      });
+    });
+
+    list.append(row);
+  });
+
+  return section;
+}
+
+function createArtistBrowseSummary() {
+  const artist = getArtistBrowseSummary();
+  if (!artist) {
+    return null;
+  }
+
+  const releaseSummary = Array.isArray(artist.releases) && artist.releases.length
+    ? artist.releases
+      .slice(0, 3)
+      .map((release) => {
+        const releaseDetail = [release.primaryType, release.firstReleaseDate].filter(Boolean).join(" | ");
+        return `<span class="detail-tag">${escapeHtml(release.title)}${releaseDetail ? ` <small>${escapeHtml(releaseDetail)}</small>` : ""}</span>`;
+      })
+      .join("")
+    : "";
+
+  const section = document.createElement("section");
+  section.className = "artist-browse-summary";
+  section.innerHTML = `
+    <div class="artist-browse-main">
+      <div class="artist-browse-art">${renderArtistArtwork(artist, "artist-browse-art-image", state.searchResults)}</div>
+      <div class="artist-browse-copy">
+        <p class="panel-kicker">Artist</p>
+        <h3 class="artist-browse-title">${escapeHtml(artist.name)}</h3>
+        <p class="item-subtitle">${escapeHtml(formatArtistSubtitle(artist) || "Artist profile from MusicBrainz")}</p>
+        <p class="artist-browse-stats">${state.searchResults.length} songs loaded</p>
+        ${artist.tags?.length ? `<p class="artist-browse-tags">${escapeHtml(artist.tags.slice(0, 5).join(" | "))}</p>` : ""}
+        ${releaseSummary ? `<div class="detail-tags detail-tags--artist">${releaseSummary}</div>` : ""}
+        ${state.artistBrowse?.error ? `<p class="field-message">${escapeHtml(state.artistBrowse.error)}</p>` : ""}
+      </div>
+    </div>
+    <button class="text-button" type="button" data-artist-browse-back>Back to search</button>
+  `;
+
+  section.querySelector('[data-artist-browse-back]').addEventListener("click", () => {
+    void runSearch({
+      historySource: "artist-search"
+    });
+  });
+
+  return section;
 }
 
 function positionActiveMenu(row, menu, anchorOverride = null) {
@@ -2193,10 +5418,30 @@ function positionActiveMenu(row, menu, anchorOverride = null) {
 
 function renderTracks() {
   const visibleTracks = getVisibleTracks();
+  const showArtistSearchResults = Boolean(state.query && !state.artistBrowse && state.artistSearchResults.length);
   document.querySelectorAll(".track-menu-popover--portal").forEach((menu) => menu.remove());
   trackList.innerHTML = "";
 
+  if (state.artistBrowse) {
+    const artistSummary = createArtistBrowseSummary();
+    if (artistSummary) {
+      trackList.append(artistSummary);
+    }
+  } else if (showArtistSearchResults) {
+    trackList.append(createArtistSearchSection());
+  }
+
   if (!visibleTracks.length) {
+    if (showArtistSearchResults || state.artistBrowse) {
+      const empty = document.createElement("div");
+      empty.className = "empty-state";
+      empty.textContent = state.artistBrowse?.isLoading
+        ? "Loading artist songs..."
+        : state.message || "No songs available for this artist.";
+      trackList.append(empty);
+      return;
+    }
+
     const empty = document.createElement("div");
     empty.className = "empty-state";
     empty.textContent = state.isLoading ? "Loading..." : state.message || "No tracks available yet.";
@@ -2207,14 +5452,17 @@ function renderTracks() {
   visibleTracks.forEach((track, index) => {
     const row = document.createElement("div");
     const duration = formatDuration(getCachedDuration(track), "--:--");
-    const provider = state.query ? ` · <span class="track-provider">${providerLabel(track.provider)}</span>` : "";
+    const provider = state.query ? ` · <span class="track-provider">${providerLabel(track.provider, track.requestedProvider)}</span>` : "";
 
     row.className = `track-row${track.key === state.selectedTrackKey ? " is-active" : ""}`;
     row.innerHTML = `
       <button class="track-main-button" type="button">
         <span class="track-index">${index + 1}</span>
         <span class="track-leading">
-          <span class="track-art">${renderArtwork(track, "track-art-image")}</span>
+          <span class="track-art">
+            ${renderArtwork(track, "track-art-image")}
+            <span class="track-art-play" aria-hidden="true">${playGlyphIcon()}</span>
+          </span>
           <span class="track-copy">
             <p class="track-title">${escapeHtml(track.title)}</p>
             <p class="track-subtitle">${escapeHtml(track.artist)}${provider}</p>
@@ -2225,8 +5473,16 @@ function renderTracks() {
       <button class="track-menu-button" type="button" aria-label="Track actions">${dotsIcon()}</button>
     `;
 
-    row.querySelector(".track-main-button").addEventListener("click", () => {
-      selectTrack(track.key, { autoplay: state.settings.playback.autoplaySelection });
+    const mainButton = row.querySelector(".track-main-button");
+    mainButton.addEventListener("mouseenter", () => {
+      prefetchPlaybackUrl(track);
+    });
+    mainButton.addEventListener("focus", () => {
+      prefetchPlaybackUrl(track);
+    });
+    mainButton.addEventListener("click", (event) => {
+      const forcePlay = Boolean(event.target instanceof Element && event.target.closest(".track-art"));
+      selectTrack(track.key, { autoplay: forcePlay || state.settings.playback.autoplaySelection });
     });
 
     const menuButton = row.querySelector(".track-menu-button");
@@ -2274,10 +5530,22 @@ function renderTrackPaneHeader() {
   const visibleTracks = getVisibleTracks();
   editPlaylistButton.hidden = Boolean(state.query) || !getEditablePlaylist();
 
+  if (state.artistBrowse) {
+    trackPaneKicker.textContent = "Artist";
+    trackPaneTitle.textContent = state.artistBrowse.name;
+    trackPaneMeta.textContent = state.artistBrowse.isLoading
+      ? "Loading songs..."
+      : `${visibleTracks.length} songs`;
+    return;
+  }
+
   if (state.query) {
     trackPaneKicker.textContent = "Search";
     trackPaneTitle.textContent = state.query;
-    trackPaneMeta.textContent = `${visibleTracks.length} results`;
+    const artistCount = state.artistSearchResults.length;
+    trackPaneMeta.textContent = artistCount
+      ? `${artistCount} artists | ${visibleTracks.length} songs`
+      : `${visibleTracks.length} songs`;
     return;
   }
 
@@ -2307,14 +5575,14 @@ function renderDetailPanel() {
   const selectedTrack = getSelectedTrack();
   const playbackTrack = getPlaybackTrack();
   const activeTrack = playbackTrack || selectedTrack;
-  const liked = activeTrack ? isTrackLiked(activeTrack.key) : false;
-  const editablePlaylist = activeTrack ? getEditablePlaylist() : null;
-  const canToggleCurrentPlaylist = Boolean(editablePlaylist && activeTrack?.trackId);
-  const isInCurrentPlaylist = canToggleCurrentPlaylist ? isTrackInPlaylist(editablePlaylist.id, activeTrack) : false;
   const tabs = [
     {
       id: "track",
       label: "Track"
+    },
+    {
+      id: "queue",
+      label: "Queue"
     },
     ...pluginHost.getDetailTabs()
   ];
@@ -2359,6 +5627,11 @@ function renderDetailPanel() {
 
   const panelBody = detailPanel.querySelector(".detail-panel-body");
 
+  if (state.activeDetailTab === "queue") {
+    renderQueuePanel(panelBody);
+    return;
+  }
+
   if (state.activeDetailTab !== "track") {
     detailTabCleanup = pluginHost.mountDetailTab(
       state.activeDetailTab,
@@ -2373,8 +5646,8 @@ function renderDetailPanel() {
       <div class="detail-art">${noteIcon()}</div>
       <div class="detail-copy">
         <p class="detail-meta">Apollo</p>
-        <h2>Your music, your layout.</h2>
-        <p class="detail-description">Toggle the library and detail panels from the top bar, resize the panes with the dividers, and keep search focused on Apollo results without boxing the interface in.</p>
+        <h2>Music, arranged around Apollo.</h2>
+        <p class="detail-description">Use the top bar to show or hide the library and detail panels, resize panes with the dividers, and keep search focused on Apollo results.</p>
       </div>
     `;
     return;
@@ -2383,13 +5656,15 @@ function renderDetailPanel() {
   const detailText = state.query
     ? `Search is live across Apollo and provider results. Use the three-dot menu for download, playlist, and save actions.`
     : activeTrack.resultSource === "library"
-      ? "This track is already in your Apollo library and can be added to playlists or downloaded directly."
-      : "This is a remote result. Save it to the Apollo server library with metadata or download it directly to the client.";
+      ? "This track is already in the Apollo library and can be added to playlists or downloaded directly."
+      : findLibraryMatch(activeTrack)
+        ? "This remote result matches a track already in the Apollo library. Playlist and playback actions are available without downloading it again."
+        : "This is a remote result. Save it to the Apollo server library with metadata or download it directly to the client.";
 
   panelBody.innerHTML = `
     <div class="detail-art">${renderArtwork(activeTrack, "detail-art-image")}</div>
     <div class="detail-copy">
-      <p class="detail-meta">${escapeHtml(providerLabel(activeTrack.provider))}</p>
+      <p class="detail-meta">${escapeHtml(providerLabel(activeTrack.provider, activeTrack.requestedProvider))}</p>
       <h2>${escapeHtml(activeTrack.title)}</h2>
       <p class="detail-description">${escapeHtml(activeTrack.artist)}${activeTrack.album ? ` | ${escapeHtml(activeTrack.album)}` : ""}</p>
       <p class="detail-description">${detailText}</p>
@@ -2398,52 +5673,7 @@ function renderDetailPanel() {
       <span class="detail-tag">${formatDuration(getCachedDuration(activeTrack), "--:--")}</span>
       <span class="detail-tag">${activeTrack.resultSource === "library" ? "Local" : "Remote"}</span>
     </div>
-    <div class="detail-actions">
-      <button class="detail-action" type="button" data-detail-action="play">Play</button>
-      <button class="detail-action" type="button" data-detail-action="like">${liked ? "Unlike" : "Like"}</button>
-      ${canToggleCurrentPlaylist ? `<button class="detail-action" type="button" data-detail-action="toggle-playlist">${isInCurrentPlaylist ? "Remove from playlist" : "Add to playlist"}</button>` : ""}
-      ${activeTrack.resultSource !== "library" ? '<button class="detail-action" type="button" data-detail-action="download-server">Save to Apollo</button>' : ""}
-      <button class="detail-action" type="button" data-detail-action="download-client">Download</button>
-      <button class="detail-action" type="button" data-detail-action="copy">Copy link</button>
-    </div>
   `;
-
-  panelBody.querySelector('[data-detail-action="play"]').addEventListener("click", () => {
-    if (selectedTrack?.key !== activeTrack.key) {
-      state.selectedTrackKey = activeTrack.key;
-    }
-    void playSelectedTrack();
-  });
-
-  panelBody.querySelector('[data-detail-action="like"]').addEventListener("click", () => {
-    toggleLike(activeTrack);
-  });
-
-  const playlistToggleButton = panelBody.querySelector('[data-detail-action="toggle-playlist"]');
-  if (playlistToggleButton && editablePlaylist) {
-    playlistToggleButton.addEventListener("click", async () => {
-      if (isInCurrentPlaylist) {
-        await removeTrackFromPlaylist(editablePlaylist.id, activeTrack);
-        return;
-      }
-      await addTrackToPlaylist(editablePlaylist.id, activeTrack);
-    });
-  }
-
-  const saveToServerButton = panelBody.querySelector('[data-detail-action="download-server"]');
-  if (saveToServerButton) {
-    saveToServerButton.addEventListener("click", () => {
-      void downloadTrackToServer(activeTrack);
-    });
-  }
-
-  panelBody.querySelector('[data-detail-action="download-client"]').addEventListener("click", () => {
-    void downloadTrackToDevice(activeTrack);
-  });
-
-  panelBody.querySelector('[data-detail-action="copy"]').addEventListener("click", () => {
-    void copyTrackLink(activeTrack);
-  });
 }
 
 function renderNowPlaying() {
@@ -2453,18 +5683,20 @@ function renderNowPlaying() {
     nowPlaying.innerHTML = `
       <div class="now-playing-shell">
         <div class="now-playing-art">${noteIcon()}</div>
-        <div class="now-playing-meta">
-          <p class="now-playing-title">Nothing playing</p>
-          <p class="now-playing-subtitle">Pick a track from your library or search.</p>
-        </div>
+      <div class="now-playing-meta">
+        <p class="now-playing-title">Nothing playing</p>
+        <p class="now-playing-subtitle">Select a track from the library or search results.</p>
       </div>
-      <button class="like-button" type="button" aria-label="Like track">${heartIcon(false)}</button>
+      </div>
+      <button class="like-button" type="button" aria-label="Like track" aria-pressed="false" disabled>${heartIcon(false)}</button>
     `;
     return;
   }
 
   const liked = isTrackLiked(currentTrack.key);
   const showSaveAction = canSaveTrackToApollo(currentTrack);
+  const showDiscordInviteAction = canInviteCurrentTrackOnDiscord();
+  const showLeaveListenAlong = Boolean(listenAlongState.joinedSessionId);
   nowPlaying.innerHTML = `
     <div class="now-playing-shell">
       <div class="now-playing-art">${renderArtwork(currentTrack, "now-playing-art-image")}</div>
@@ -2475,15 +5707,21 @@ function renderNowPlaying() {
     </div>
     <div class="now-playing-actions">
       ${showSaveAction ? '<button class="now-playing-icon-button" type="button" data-now-playing-action="save" aria-label="Save to Apollo">' + saveToApolloIcon() + "</button>" : ""}
-      <button class="like-button${liked ? " is-liked" : ""}" type="button" aria-label="Like track">${heartIcon(liked)}</button>
+      ${showDiscordInviteAction ? '<button class="text-button now-playing-invite-button" type="button" data-now-playing-action="discord-invite">Invite on Discord</button>' : ""}
+      ${showLeaveListenAlong ? '<button class="text-button now-playing-invite-button" type="button" data-now-playing-action="leave-listen-along">Leave listen along</button>' : ""}
+      <button class="like-button${liked ? " is-liked" : ""}" type="button" aria-label="Like track" aria-pressed="${liked}">${heartIcon(liked)}</button>
     </div>
   `;
 
   nowPlaying.querySelector(".now-playing-artist").addEventListener("click", () => {
+    replaceCurrentNavigationHistoryState();
     state.query = currentTrack.artist;
     searchInput.value = currentTrack.artist;
+    renderSearchField();
     clearTimeout(state.searchTimer);
-    void runSearch();
+    void runSearch({
+      historySource: "artist-search"
+    });
   });
 
   nowPlaying.querySelector(".like-button").addEventListener("click", () => {
@@ -2496,15 +5734,45 @@ function renderNowPlaying() {
       void downloadTrackToServer(currentTrack);
     });
   }
+
+  const inviteButton = nowPlaying.querySelector('[data-now-playing-action="discord-invite"]');
+  if (inviteButton) {
+    inviteButton.addEventListener("click", () => {
+      void openDiscordInviteModal();
+    });
+  }
+
+  const leaveButton = nowPlaying.querySelector('[data-now-playing-action="leave-listen-along"]');
+  if (leaveButton) {
+    leaveButton.addEventListener("click", () => {
+      leaveJoinedListenAlongSession();
+    });
+  }
 }
 
 function renderStatus() {
   serverStatus.textContent = state.message;
 }
 
+function renderPlaybackUi({ includeTracks = false, includeDetail = false } = {}) {
+  if (includeTracks) {
+    renderTracks();
+  }
+
+  if (includeDetail) {
+    renderDetailPanel();
+  }
+
+  renderNowPlaying();
+  renderStatus();
+  renderPlayback();
+}
+
 function renderPlayback() {
   repeatButton.innerHTML = getRepeatIcon();
   repeatButton.classList.toggle("is-active", state.repeatMode !== "off");
+  shuffleButton.innerHTML = getShuffleIcon();
+  shuffleButton.classList.toggle("is-active", state.shuffleEnabled);
   previousButton.innerHTML = getPreviousIcon();
   nextButton.innerHTML = getNextIcon();
   playButton.innerHTML = getPlayButtonIcon();
@@ -2519,6 +5787,8 @@ function renderPlayback() {
   progressCurrent.textContent = formatDuration(currentTime);
   progressTotal.textContent = formatDuration(duration);
   progressFill.style.width = `${progress}%`;
+  volumeSlider.value = String(audioPlayer.volume);
+  syncRangeVisuals();
   volumeButton.setAttribute("aria-label", audioPlayer.muted || audioPlayer.volume === 0 ? "Unmute" : "Mute");
 }
 
@@ -2570,6 +5840,8 @@ function applyLayout() {
 }
 
 function render() {
+  renderSearchField();
+  renderWindowChrome();
   applyLayout();
   updateAuthButton();
   renderPlaylists();
@@ -2583,6 +5855,19 @@ function render() {
     state: createPluginStateSnapshot(),
     playback: createPluginPlaybackSnapshot()
   });
+}
+
+function isPlaybackRequestCurrent(requestId) {
+  return requestId === activePlaybackRequestId;
+}
+
+function cancelPendingPlaybackStart({ keepMessage = false } = {}) {
+  activePlaybackRequestId += 1;
+  state.isBuffering = false;
+
+  if (!keepMessage && state.message.startsWith("Loading ")) {
+    state.message = "";
+  }
 }
 
 function waitForPlaybackReady() {
@@ -2614,110 +5899,186 @@ function waitForPlaybackReady() {
 }
 
 async function resolvePlaybackUrl(track) {
-  if (playbackUrlCache.has(track.key)) {
-    return playbackUrlCache.get(track.key);
+  const cachedUrl = getCachedPlaybackUrl(track.key);
+  if (cachedUrl) {
+    return cachedUrl;
   }
 
-  if (track.provider === "library") {
-    const directUrl = withAccessToken(`${state.apiBase}/stream/${track.trackId || track.id}`);
-    playbackUrlCache.set(track.key, directUrl);
-    return directUrl;
+  if (pendingPlaybackUrlCache.has(track.key)) {
+    return pendingPlaybackUrlCache.get(track.key);
   }
 
-  const payload = await requestJson("/api/playback", {
-    method: "POST",
-    body: JSON.stringify(buildPlaybackPayload(track))
-  });
+  const pendingRequest = (async () => {
+    if (track.provider === "library") {
+      const directUrl = withAccessToken(`${state.apiBase}/stream/${track.trackId || track.id}`);
+      return cachePlaybackUrl(track.key, directUrl, Number.POSITIVE_INFINITY);
+    }
 
-  const streamUrl = withAccessToken(payload.streamUrl);
-  playbackUrlCache.set(track.key, streamUrl);
-  return streamUrl;
+    const payload = await requestJson("/api/playback", {
+      method: "POST",
+      body: JSON.stringify(buildPlaybackPayload(track))
+    });
+
+    const streamUrl = withAccessToken(payload.streamUrl);
+    return cachePlaybackUrl(track.key, streamUrl);
+  })();
+
+  pendingPlaybackUrlCache.set(track.key, pendingRequest);
+
+  try {
+    return await pendingRequest;
+  } finally {
+    pendingPlaybackUrlCache.delete(track.key);
+  }
 }
 
-async function playSelectedTrack() {
-  const selectedTrack = getSelectedTrack();
-  if (!selectedTrack) {
-    return;
+async function playResolvedTrack(track, { select = true, replaceQueue = false, queueTracks = null, preserveQueue = false, preserveListenAlong = false } = {}) {
+  if (!track) {
+    return false;
   }
 
+  const requestId = ++activePlaybackRequestId;
+
+  if (!preserveListenAlong) {
+    stopJoinedListenAlongSession();
+  }
+
+  if (select) {
+    state.selectedTrackKey = track.key;
+  }
+
+  if (!preserveQueue) {
+    ensurePlaybackQueue(track, {
+      replace: replaceQueue,
+      queueTracks,
+      mode: replaceQueue ? (state.query ? "radio" : "context") : state.playbackQueueMode
+    });
+  }
+  state.transientPlaybackTrack = getTrackByKey(track.key) ? null : serialiseTrack(track);
   state.isBuffering = true;
-  state.message = `Loading ${selectedTrack.title}...`;
+  state.message = `Loading ${track.title}...`;
+  persistPlaybackState();
   render();
 
   try {
-    const nextUrl = await resolvePlaybackUrl(selectedTrack);
+    const nextUrl = await resolvePlaybackUrl(track);
+    if (!isPlaybackRequestCurrent(requestId)) {
+      return false;
+    }
+
     const currentSrc = audioPlayer.currentSrc || audioPlayer.src;
-    const urlChanged = state.playbackTrackKey !== selectedTrack.key || currentSrc !== nextUrl;
+    const urlChanged = state.playbackTrackKey !== track.key || currentSrc !== nextUrl;
 
     if (urlChanged) {
       audioPlayer.pause();
       audioPlayer.src = nextUrl;
       audioPlayer.load();
-      state.playbackTrackKey = selectedTrack.key;
+      state.playbackTrackKey = track.key;
       persistPlaybackState();
       pluginHost?.emit("playback:track-changed", {
-        track: selectedTrack,
+        track,
         playback: createPluginPlaybackSnapshot()
       });
-      await waitForPlaybackReady();
+    }
+
+    if (!isPlaybackRequestCurrent(requestId)) {
+      return false;
     }
 
     await audioPlayer.play();
+    if (!isPlaybackRequestCurrent(requestId)) {
+      audioPlayer.pause();
+      return false;
+    }
+
     state.message = "";
+    prefetchUpcomingPlayback(track);
+    window.setTimeout(() => {
+      if (isPlaybackRequestCurrent(requestId)) {
+        void maybeExtendAutoplayQueue(track);
+      }
+    }, 0);
+    return true;
   } catch (error) {
+    if (!isPlaybackRequestCurrent(requestId)) {
+      return false;
+    }
+
     state.isPlaying = false;
     state.isBuffering = false;
     state.message = error.message;
     pluginHost?.emit("playback:error", {
-      track: selectedTrack,
+      track,
       error
     });
     render();
+    return false;
   }
+}
+
+async function playSelectedTrack({ replaceQueue = true } = {}) {
+  const selectedTrack = getSelectedTrack();
+  if (!selectedTrack) {
+    return;
+  }
+
+  await playResolvedTrack(selectedTrack, {
+    select: false,
+    replaceQueue
+  });
 }
 
 function getNextTrack(offset, wrap = false) {
-  const visibleTracks = getVisibleTracks();
-  if (!visibleTracks.length) {
-    return null;
-  }
+  return getAdjacentQueueTrack(offset, wrap)?.track || null;
+}
 
-  const currentIndex = visibleTracks.findIndex((track) => track.key === state.selectedTrackKey);
-  const safeIndex = currentIndex >= 0 ? currentIndex : 0;
-  let nextIndex = safeIndex + offset;
-
-  if (wrap) {
-    if (nextIndex < 0) {
-      nextIndex = visibleTracks.length - 1;
-    } else if (nextIndex >= visibleTracks.length) {
-      nextIndex = 0;
-    }
-  }
-
-  if (nextIndex < 0 || nextIndex >= visibleTracks.length) {
-    return null;
-  }
-
-  return visibleTracks[nextIndex];
+function getRandomTrack() {
+  return getRandomQueueTrack()?.track || null;
 }
 
 function playAdjacent(offset, wrap = false) {
-  const nextTrack = getNextTrack(offset, wrap);
+  const nextEntry = state.shuffleEnabled ? getRandomQueueTrack() : getAdjacentQueueTrack(offset, wrap);
+  if (!nextEntry?.track) {
+    return;
+  }
+
+  const nextTrack = consumeQueueEntry(nextEntry);
   if (!nextTrack) {
     return;
   }
 
-  state.selectedTrackKey = nextTrack.key;
+  state.selectedTrackKey = nextEntry.track.key;
   closeActiveMenu();
   persistPlaybackState();
   render();
-  void playSelectedTrack();
+  void playResolvedTrack(nextTrack, {
+    select: false,
+    preserveQueue: true
+  });
 }
 
 function resetLayout() {
   state.layout = structuredClone(DEFAULT_LAYOUT);
   persistLayout();
   render();
+}
+
+async function initialiseWindowChrome() {
+  renderWindowChrome();
+
+  if (!state.windowChrome.available) {
+    return;
+  }
+
+  try {
+    updateWindowChrome(await windowControls.getState());
+  } catch {
+    renderWindowChrome();
+  }
+
+  removeWindowControlsListener = windowControls.onStateChange((nextState) => {
+    updateWindowChrome(nextState);
+  });
 }
 
 function togglePanel(panelId) {
@@ -2794,6 +6155,7 @@ document.addEventListener("click", (event) => {
   if (
     !event.target.closest(".track-menu-popover") &&
     !event.target.closest(".playlist-menu-popover") &&
+    !event.target.closest(".queue-menu-popover") &&
     !event.target.closest(".track-menu-button") &&
     !event.target.closest(".library-item-menu")
   ) {
@@ -2827,6 +6189,16 @@ window.addEventListener("resize", () => {
 
   closeActiveMenu();
   render();
+});
+
+window.addEventListener("mousedown", handleNavigationMouseButton, true);
+window.addEventListener("popstate", (event) => {
+  const snapshot = event.state?.apolloNavigation;
+  if (!snapshot) {
+    return;
+  }
+
+  void applyNavigationSnapshot(snapshot);
 });
 
 resizers.forEach((resizer) => {
@@ -2864,6 +6236,15 @@ toggleDetailButton.addEventListener("click", () => {
 });
 
 resetLayoutButton.addEventListener("click", resetLayout);
+windowMinimizeButton?.addEventListener("click", () => {
+  windowControls?.minimize();
+});
+windowMaximizeButton?.addEventListener("click", () => {
+  windowControls?.toggleMaximize();
+});
+windowCloseButton?.addEventListener("click", () => {
+  windowControls?.close();
+});
 authButton.addEventListener("click", () => {
   if (state.auth.token) {
     void signOut().then(() => {
@@ -2875,11 +6256,35 @@ authButton.addEventListener("click", () => {
   openAuthModal("Enter the Apollo shared secret to continue.");
 });
 openSettingsButton.addEventListener("click", openSettingsModal);
+connectionModalRetry?.addEventListener("click", () => {
+  void retryApolloConnection();
+});
+connectionModalSettings?.addEventListener("click", () => {
+  closeConnectionModal();
+  openSettingsModal();
+});
+settingsDiscordSocialConnect?.addEventListener("click", async () => {
+  try {
+    await getDiscordSocialBridge()?.startAuth?.();
+  } catch (error) {
+    state.discordSocial.message = error.message;
+    renderDiscordSocialSettings();
+  }
+});
+settingsDiscordSocialSignout?.addEventListener("click", async () => {
+  state.discordSocial.message = "To fully disconnect Apollo, open Discord Settings and revoke Apollo from the authorized apps or connected games list.";
+  renderDiscordSocialSettings();
+});
 
 playlistModalClose.addEventListener("click", closePlaylistModal);
 playlistFormCancel.addEventListener("click", closePlaylistModal);
 settingsModalClose.addEventListener("click", closeSettingsModal);
 settingsFormCancel.addEventListener("click", closeSettingsModal);
+discordInviteModalClose?.addEventListener("click", closeDiscordInviteModal);
+discordInviteCancel?.addEventListener("click", closeDiscordInviteModal);
+discordInviteMessageInput?.addEventListener("input", () => {
+  state.discordInvite.message = discordInviteMessageInput.value;
+});
 playlistArtworkChoose.addEventListener("click", () => {
   playlistArtworkInput.click();
 });
@@ -2889,6 +6294,23 @@ playlistModal.querySelectorAll("[data-modal-close]").forEach((element) => {
 });
 settingsModal.querySelectorAll("[data-settings-close]").forEach((element) => {
   element.addEventListener("click", closeSettingsModal);
+});
+discordInviteModal.querySelectorAll("[data-discord-invite-close]").forEach((element) => {
+  element.addEventListener("click", closeDiscordInviteModal);
+});
+trackDeleteModal.querySelectorAll("[data-track-delete-close]").forEach((element) => {
+  element.addEventListener("click", closeTrackDeleteModal);
+});
+trackDeleteModalClose?.addEventListener("click", closeTrackDeleteModal);
+trackDeleteCancel?.addEventListener("click", closeTrackDeleteModal);
+trackDeleteConfirm?.addEventListener("click", () => {
+  if (!state.trackDeleteModal.track || state.trackDeleteModal.isDeleting) {
+    return;
+  }
+
+  void deleteTrackFromApollo(state.trackDeleteModal.track, {
+    closeModal: true
+  });
 });
 
 authForm.addEventListener("submit", async (event) => {
@@ -2931,6 +6353,7 @@ playlistForm.addEventListener("submit", async (event) => {
 
     state.selectedPlaylistId = playlistId || state.selectedPlaylistId;
     await refreshLibrary();
+    syncNavigationHistory(isEditing ? "playlist-edit" : "playlist-create");
     closePlaylistModal();
     state.message = isEditing ? "Playlist updated." : "Playlist created.";
     renderStatus();
@@ -2984,6 +6407,7 @@ playlistDeleteButton.addEventListener("click", async () => {
     await deletePlaylist(state.modal.playlistId);
     state.selectedPlaylistId = "all-tracks";
     await refreshLibrary();
+    syncNavigationHistory("playlist-delete");
     closePlaylistModal();
     state.message = "Playlist deleted.";
     renderStatus();
@@ -2994,24 +6418,80 @@ playlistDeleteButton.addEventListener("click", async () => {
 
 settingsForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  state.settings = saveCurrentSettingsForm();
-  persistSettings();
-  state.repeatMode = state.settings.playback.defaultRepeatMode;
-  applySettings();
-  settingsFormMessage.textContent = "Saved.";
-  persistPlaybackState();
+  try {
+    const previousApiBase = state.apiBase;
+    const nextSettings = saveCurrentSettingsForm();
+    const nextApiBase = buildApiBase(nextSettings.connection);
 
-  if (state.query) {
-    await runSearch();
-  } else {
-    render();
+    state.settings = nextSettings;
+    persistSettings();
+    state.repeatMode = state.settings.playback.defaultRepeatMode;
+    applySettings();
+    settingsFormMessage.textContent = "Saved.";
+    persistPlaybackState();
+    closeSettingsModal();
+
+    if (nextApiBase !== previousApiBase) {
+      handleServerEndpointChanged();
+      state.message = `Apollo server updated to ${nextApiBase}.`;
+      render();
+      await initialiseApolloClient();
+      if (state.query && state.isConnected && !state.auth.modalOpen) {
+        void runSearch();
+      }
+      return;
+    }
+
+    if (state.query) {
+      setTimeout(() => {
+        void runSearch();
+      }, 0);
+    } else {
+      render();
+    }
+  } catch (error) {
+    settingsFormMessage.textContent = error.message;
+  }
+});
+
+discordInviteForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (state.discordInvite.isSending || !state.discordInvite.selectedFriendId) {
+    return;
   }
 
-  closeSettingsModal();
+  state.discordInvite.isSending = true;
+  state.discordInvite.formMessage = "";
+  state.discordInvite.message = discordInviteMessageInput?.value || state.discordInvite.message;
+  renderDiscordInviteModal();
+
+  try {
+    await getDiscordSocialBridge()?.sendActivityInvite?.({
+      userId: state.discordInvite.selectedFriendId,
+      content: state.discordInvite.message || "Listen along on Apollo"
+    });
+    closeDiscordInviteModal();
+    state.message = "Discord invite sent.";
+    renderStatus();
+  } catch (error) {
+    state.discordInvite.isSending = false;
+    state.discordInvite.formMessage = error?.message || "Unable to send Discord invite.";
+    renderDiscordInviteModal();
+  }
+});
+
+settingsVolume.addEventListener("input", () => {
+  syncRangeVisual(settingsVolume, state.settings.audio.volume);
 });
 
 document.addEventListener("keydown", (event) => {
   if (state.auth.modalOpen) {
+    return;
+  }
+
+  if (event.key === "BrowserBack" || event.key === "BrowserForward") {
+    event.preventDefault();
+    requestHistoryNavigation(event.key === "BrowserBack" ? -1 : 1);
     return;
   }
 
@@ -3022,6 +6502,16 @@ document.addEventListener("keydown", (event) => {
 
   if (event.key === "Escape" && state.settingsModalOpen) {
     closeSettingsModal();
+    return;
+  }
+
+  if (event.key === "Escape" && state.discordInvite.isOpen) {
+    closeDiscordInviteModal();
+    return;
+  }
+
+  if (event.key === "Escape" && state.trackDeleteModal.isOpen) {
+    closeTrackDeleteModal();
     return;
   }
 
@@ -3051,10 +6541,35 @@ document.addEventListener("keydown", (event) => {
 
 searchInput.addEventListener("input", (event) => {
   state.query = event.target.value.trim();
+  renderSearchField();
   clearTimeout(state.searchTimer);
   state.searchTimer = setTimeout(() => {
-    void runSearch();
+    void runSearch({
+      historySource: "search-input"
+    });
   }, state.settings.search.liveSearchDelayMs);
+});
+
+searchInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || !searchInput.value.trim()) {
+    return;
+  }
+
+  event.preventDefault();
+  clearTimeout(state.searchTimer);
+  void setQuery("", {
+    run: true,
+    historySource: "search-input"
+  });
+});
+
+clearSearchButton.addEventListener("click", () => {
+  clearTimeout(state.searchTimer);
+  void setQuery("", {
+    run: true,
+    historySource: "search-input"
+  });
+  searchInput.focus();
 });
 
 repeatButton.addEventListener("click", () => {
@@ -3065,13 +6580,22 @@ repeatButton.addEventListener("click", () => {
   renderPlayback();
 });
 
+shuffleButton.addEventListener("click", () => {
+  state.shuffleEnabled = !state.shuffleEnabled;
+  persistPlaybackState();
+  renderPlayback();
+});
+
 playButton.addEventListener("click", async () => {
-  if (state.isBuffering) {
+  if (!audioPlayer.src) {
+    await playSelectedTrack();
     return;
   }
 
-  if (!audioPlayer.src) {
-    await playSelectedTrack();
+  if (state.isBuffering) {
+    cancelPendingPlaybackStart();
+    audioPlayer.pause();
+    renderPlaybackUi();
     return;
   }
 
@@ -3131,14 +6655,14 @@ volumeButton.addEventListener("click", () => {
 
 audioPlayer.addEventListener("loadstart", () => {
   state.isBuffering = true;
-  renderPlayback();
+  renderPlaybackUi();
   syncDiscordPresence();
   pluginHost?.emit("playback:state", createPluginPlaybackSnapshot());
 });
 
 audioPlayer.addEventListener("waiting", () => {
   state.isBuffering = true;
-  renderPlayback();
+  renderPlaybackUi();
   syncDiscordPresence();
   pluginHost?.emit("playback:state", createPluginPlaybackSnapshot());
 });
@@ -3147,7 +6671,7 @@ audioPlayer.addEventListener("play", () => {
   state.isPlaying = true;
   state.isBuffering = false;
   state.message = "";
-  render();
+  renderPlaybackUi();
   syncDiscordPresence();
   pluginHost?.emit("playback:state", createPluginPlaybackSnapshot());
 });
@@ -3157,12 +6681,18 @@ audioPlayer.addEventListener("pause", () => {
   if (!audioPlayer.ended) {
     state.isBuffering = false;
   }
-  renderPlayback();
+  renderPlaybackUi();
   syncDiscordPresence();
   pluginHost?.emit("playback:state", createPluginPlaybackSnapshot());
 });
 
 audioPlayer.addEventListener("timeupdate", renderPlayback);
+
+audioPlayer.addEventListener("seeked", () => {
+  renderPlayback();
+  syncDiscordPresence();
+  pluginHost?.emit("playback:state", createPluginPlaybackSnapshot());
+});
 
 audioPlayer.addEventListener("loadedmetadata", () => {
   const playbackTrack = getPlaybackTrack();
@@ -3174,7 +6704,10 @@ audioPlayer.addEventListener("loadedmetadata", () => {
     audioPlayer.currentTime = Math.min(playbackState.currentTime, audioPlayer.duration || playbackState.currentTime);
     state.restoredPlaybackKey = null;
   }
-  render();
+  renderPlaybackUi({
+    includeTracks: true,
+    includeDetail: true
+  });
   syncDiscordPresence();
   pluginHost?.emit("playback:metadata", createPluginPlaybackSnapshot());
 });
@@ -3194,14 +6727,22 @@ audioPlayer.addEventListener("ended", () => {
     return;
   }
 
-  const nextTrack = getNextTrack(1, false);
-  if (nextTrack) {
-    state.selectedTrackKey = nextTrack.key;
-    void playSelectedTrack();
+  const nextEntry = getAdjacentQueueTrack(1, false);
+  if (nextEntry?.track) {
+    const nextTrack = consumeQueueEntry(nextEntry);
+    if (!nextTrack) {
+      return;
+    }
+
+    state.selectedTrackKey = nextEntry.track.key;
+    void playResolvedTrack(nextTrack, {
+      select: false,
+      preserveQueue: true
+    });
     return;
   }
 
-  renderPlayback();
+  renderPlaybackUi();
   syncDiscordPresence();
   pluginHost?.emit("playback:state", createPluginPlaybackSnapshot());
 });
@@ -3233,7 +6774,6 @@ audioPlayer.addEventListener("timeupdate", () => {
   persistPlaybackState();
 });
 
-audioPlayer.addEventListener("seeked", syncDiscordPresence);
 audioPlayer.addEventListener("emptied", syncDiscordPresence);
 
 pluginHost = createPluginHost({
@@ -3246,8 +6786,37 @@ pluginHost = createPluginHost({
 await pluginHost.loadPlugins(builtinPlugins);
 applySettings();
 render();
+await initialiseWindowChrome();
+
+async function initialiseDiscordSocial() {
+  const bridge = getDiscordSocialBridge();
+  if (!bridge?.available) {
+    renderDiscordSocialSettings();
+    return () => {};
+  }
+
+  try {
+    applyDiscordSocialState(await bridge.getState());
+  } catch {
+    renderDiscordSocialSettings();
+  }
+
+  return bridge.onStateChange((nextState) => {
+    applyDiscordSocialState(nextState);
+  });
+}
+
+const removeDeepLinkListener = window.apolloDesktop?.onDeepLink?.((url) => {
+  void handleApolloDeepLink(url);
+});
+const removeDiscordSocialListener = await initialiseDiscordSocial();
 
 window.addEventListener("beforeunload", () => {
+  stopJoinedListenAlongSession();
+  void clearPublishedListenAlongSession();
+  removeWindowControlsListener?.();
+  removeDeepLinkListener?.();
+  removeDiscordSocialListener?.();
   pluginHost?.dispose();
 });
 
@@ -3270,3 +6839,4 @@ async function initialiseApolloClient() {
 }
 
 await initialiseApolloClient();
+initialiseNavigationHistory();
