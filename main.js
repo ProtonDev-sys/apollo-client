@@ -3,6 +3,7 @@ const path = require("node:path");
 const fs = require("node:fs");
 const { createDiscordPresenceController } = require("./discord-presence");
 const { createDiscordSocialBridge } = require("./discord-social-bridge");
+const { createListenAlongServer } = require("./src/listen-along-p2p");
 
 const APOLLO_PROTOCOL = "apollo";
 const DEFAULT_DISCORD_CLIENT_ID = "1480728455263031296";
@@ -25,18 +26,60 @@ let latestDiscordConfig = null;
 let latestDiscordPlayback = null;
 let latestDiscordSocialConfigSignature = "";
 let isCleaningUpForQuit = false;
+let appLogFilePath = null;
 let discordLogFilePath = null;
+let listenAlongServer = null;
+const MAX_LOG_FILE_BYTES = 4 * 1024 * 1024;
 
-function logDiscord(message) {
-  if (!discordLogFilePath) {
+function appendLogLine(targetPath, source, message) {
+  if (!targetPath) {
     return;
   }
 
   try {
-    fs.appendFileSync(discordLogFilePath, `[${new Date().toISOString()}] ${message}\n`);
+    const currentSize = fs.existsSync(targetPath) ? fs.statSync(targetPath).size : 0;
+    if (currentSize >= MAX_LOG_FILE_BYTES) {
+      fs.writeFileSync(targetPath, "");
+    }
+
+    fs.appendFileSync(targetPath, `[${new Date().toISOString()}] [${source}] ${message}\n`);
   } catch {
     // Ignore logging failures.
   }
+}
+
+function logApp(source, message) {
+  appendLogLine(appLogFilePath, source, message);
+}
+
+function logDiscord(message) {
+  if (appLogFilePath) {
+    appendLogLine(appLogFilePath, "discord", message);
+  }
+
+  if (discordLogFilePath && discordLogFilePath !== appLogFilePath) {
+    appendLogLine(discordLogFilePath, "discord", message);
+  }
+}
+
+function buildRuntimeInfo() {
+  const execPath = process.execPath || "";
+  return {
+    appVersion: app.getVersion(),
+    appPath: app.getAppPath(),
+    userDataPath: app.getPath("userData"),
+    execPath,
+    execDirectory: execPath ? path.dirname(execPath) : "",
+    currentWorkingDirectory: (() => {
+      try {
+        return process.cwd();
+      } catch {
+        return "";
+      }
+    })(),
+    logPath: appLogFilePath || path.join(app.getPath("userData"), "apollo-client.log"),
+    isPackaged: app.isPackaged
+  };
 }
 
 function buildWindowState(window) {
@@ -53,16 +96,47 @@ function buildWindowState(window) {
   };
 }
 
-function sendWindowState(window) {
-  if (!window || window.isDestroyed() || window.webContents.isDestroyed()) {
+function canSendToWindow(window) {
+  return Boolean(window && !window.isDestroyed() && !window.webContents.isDestroyed());
+}
+
+function sendToWindow(window, channel, payload) {
+  if (!canSendToWindow(window)) {
     return;
   }
 
-  window.webContents.send("window-controls:state-changed", buildWindowState(window));
+  window.webContents.send(channel, payload);
+}
+
+function sendWindowState(window) {
+  sendToWindow(window, "window-controls:state-changed", buildWindowState(window));
 }
 
 function getEventWindow(event) {
   return BrowserWindow.fromWebContents(event.sender);
+}
+
+function getUnavailableDiscordSocialState() {
+  return {
+    available: false,
+    helperRunning: false,
+    authenticated: false,
+    ready: false,
+    authInProgress: false,
+    message: process.platform === "win32"
+      ? "Discord Social SDK helper is unavailable."
+      : "Discord Social SDK is only configured for Windows builds."
+  };
+}
+
+function getListenAlongState() {
+  return listenAlongServer?.getState?.() || {
+    available: false,
+    running: false,
+    port: 0,
+    advertisedHosts: [],
+    message: "Listen along server is unavailable."
+  };
 }
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -121,6 +195,49 @@ ipcMain.handle("discord-social:send-activity-invite", async (_event, payload) =>
   return discordSocial.sendActivityInvite(payload || {});
 });
 
+ipcMain.handle("listen-along:get-state", async () => {
+  return getListenAlongState();
+});
+
+ipcMain.handle("listen-along:publish-session", async (_event, payload) => {
+  if (!listenAlongServer) {
+    throw new Error("Listen along server is unavailable.");
+  }
+
+  const result = await listenAlongServer.publishSession(payload || {});
+  sendListenAlongState();
+  return result;
+});
+
+ipcMain.handle("listen-along:clear-session", async (_event, sessionId) => {
+  listenAlongServer?.clearSession?.(sessionId);
+  return listenAlongServer?.getState?.() || null;
+});
+
+ipcMain.on("app:get-runtime-info-sync", (event) => {
+  event.returnValue = buildRuntimeInfo();
+});
+
+ipcMain.on("app:log", (_event, payload) => {
+  if (!payload || typeof payload !== "object") {
+    return;
+  }
+
+  const source = String(payload.source || "renderer").trim() || "renderer";
+  const message = String(payload.message || "").trim();
+  const details = typeof payload.details === "string"
+    ? payload.details.trim()
+    : payload.details != null
+      ? JSON.stringify(payload.details)
+      : "";
+
+  if (!message && !details) {
+    return;
+  }
+
+  logApp(source, details ? `${message} ${details}`.trim() : message);
+});
+
 ipcMain.handle("window-controls:get-state", (event) => {
   return buildWindowState(getEventWindow(event));
 });
@@ -168,27 +285,40 @@ function getDiscordSocialApplicationId(config = latestDiscordConfig) {
 
 function getDiscordSocialState() {
   if (!discordSocial) {
-    return {
-      available: false,
-      helperRunning: false,
-      authenticated: false,
-      ready: false,
-      authInProgress: false,
-      message: process.platform === "win32"
-        ? "Discord Social SDK helper is unavailable."
-        : "Discord Social SDK is only configured for Windows builds."
-    };
+    return getUnavailableDiscordSocialState();
   }
 
   return discordSocial.getState();
 }
 
 function sendDiscordSocialState() {
-  if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
+  sendToWindow(mainWindow, "discord-social:state-changed", getDiscordSocialState());
+}
+
+function sendListenAlongState() {
+  sendToWindow(mainWindow, "listen-along:state-changed", getListenAlongState());
+}
+
+async function logRendererDesktopBridgeState() {
+  if (!canSendToWindow(mainWindow)) {
     return;
   }
 
-  mainWindow.webContents.send("discord-social:state-changed", getDiscordSocialState());
+  try {
+    const bridgeSummary = await mainWindow.webContents.executeJavaScript(`
+      JSON.stringify({
+        hasApolloDesktop: Boolean(window.apolloDesktop),
+        hasDiscordPresence: Boolean(window.apolloDesktop?.discordPresence),
+        hasDiscordSocial: Boolean(window.apolloDesktop?.discordSocial),
+        discordSocialAvailable: Boolean(window.apolloDesktop?.discordSocial?.available),
+        hasWindowControls: Boolean(window.apolloDesktop?.windowControls),
+        windowControlsAvailable: Boolean(window.apolloDesktop?.windowControls?.available)
+      })
+    `, true);
+    logDiscord(`[renderer-bridge] ${bridgeSummary}`);
+  } catch (error) {
+    logDiscord(`[renderer-bridge] probe failed error=${error?.message || "unknown"}`);
+  }
 }
 
 function discordSocialCanHandlePresence() {
@@ -283,11 +413,11 @@ function dispatchDeepLink(url) {
   }
 
   const send = () => {
-    if (!mainWindow || pendingDeepLinkUrl !== url) {
+    if (!canSendToWindow(mainWindow) || pendingDeepLinkUrl !== url) {
       return;
     }
 
-    mainWindow.webContents.send("apollo:deep-link", url);
+    sendToWindow(mainWindow, "apollo:deep-link", url);
     pendingDeepLinkUrl = null;
   };
 
@@ -312,8 +442,13 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: false
     }
+  });
+
+  mainWindow.webContents.on("preload-error", (_event, preloadPath, error) => {
+    logDiscord(`[preload-error] path=${preloadPath} error=${error?.message || "unknown"}`);
   });
 
   mainWindow.on("closed", () => {
@@ -331,6 +466,11 @@ function createWindow() {
   mainWindow.webContents.on("did-finish-load", () => {
     sendWindowState(mainWindow);
     sendDiscordSocialState();
+    sendListenAlongState();
+    void logRendererDesktopBridgeState();
+    setTimeout(() => {
+      void logRendererDesktopBridgeState();
+    }, 1500);
     if (pendingDeepLinkUrl) {
       dispatchDeepLink(pendingDeepLinkUrl);
     }
@@ -357,10 +497,28 @@ if (hasSingleInstanceLock) {
   });
 
   app.whenReady().then(() => {
+    appLogFilePath = path.join(app.getPath("userData"), "apollo-client.log");
     discordLogFilePath = path.join(app.getPath("userData"), "apollo-discord.log");
+    logApp("main", `app ready version=${app.getVersion()} packaged=${app.isPackaged}`);
     logDiscord("app ready");
     registerApolloProtocol();
     latestDiscordConfig = getDiscordPresenceDefaults();
+    listenAlongServer = createListenAlongServer({
+      logger: (message) => {
+        logDiscord(message);
+      }
+    });
+    listenAlongServer.on("state", () => {
+      const state = listenAlongServer?.getState?.();
+      logDiscord(
+        `[listen-along] running=${Boolean(state?.running)} port=${state?.port || 0} hosts=${(state?.advertisedHosts || []).join(",")}`
+      );
+      sendListenAlongState();
+    });
+    void listenAlongServer.start().catch((error) => {
+      logDiscord(`[listen-along] start failed error=${error?.message || "unknown"}`);
+      sendListenAlongState();
+    });
     discordSocial = createDiscordSocialBridge({
       applicationId: getDiscordSocialApplicationId(latestDiscordConfig),
       appPath: app.getAppPath(),
@@ -413,6 +571,7 @@ if (hasSingleInstanceLock) {
     isCleaningUpForQuit = true;
 
     Promise.allSettled([
+      listenAlongServer?.stop(),
       discordSocial?.destroy(),
       discordPresence.destroy()
     ]).finally(() => {

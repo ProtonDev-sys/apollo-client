@@ -45,7 +45,8 @@ cl /nologo /std:c++17 /EHsc /MD ^
   /link ^
   /LIBPATH:"%SDK_DIR%\lib\release" ^
   /OUT:"%OUT_DIR%\discord-social-helper.exe" ^
-  discord_partner_sdk.lib
+  discord_partner_sdk.lib ^
+  Crypt32.lib
 if errorlevel 1 exit /b 1
 
 copy /Y "%SDK_DIR%\bin\release\discord_partner_sdk.dll" "%OUT_DIR%\discord_partner_sdk.dll" >nul

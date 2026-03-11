@@ -14,7 +14,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link
-      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap"
       rel="stylesheet"
     >
     <link rel="stylesheet" href="./styles.css">
@@ -60,6 +60,16 @@
 
       <header class="topbar">
         <div class="topbar-side">
+          <button id="navigation-back-button" class="chrome-button" type="button" aria-label="Go back">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m15 18-6-6 6-6"/>
+            </svg>
+          </button>
+          <button id="navigation-forward-button" class="chrome-button" type="button" aria-label="Go forward">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <path d="m9 18 6-6-6-6"/>
+            </svg>
+          </button>
           <button id="toggle-sidebar-button" class="chrome-button" type="button" aria-label="Toggle library">
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
               <rect x="3" y="4" width="18" height="16" rx="2"/>
@@ -299,6 +309,33 @@
       </div>
     </div>
 
+    <div id="confirm-modal" class="modal" aria-hidden="true">
+      <div class="modal-backdrop" data-confirm-close></div>
+      <div class="modal-dialog modal-dialog--confirm" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
+        <div class="modal-header">
+          <div>
+            <p class="panel-kicker">Apollo</p>
+            <h2 id="confirm-modal-title" class="modal-title">Confirm action</h2>
+          </div>
+          <button class="icon-text-button" type="button" aria-label="Close confirmation" data-confirm-close>
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M18 6 6 18"/>
+              <path d="m6 6 12 12"/>
+            </svg>
+          </button>
+        </div>
+
+        <div class="modal-form">
+          <p id="confirm-modal-copy" class="modal-copy"></p>
+
+          <div class="modal-actions">
+            <button id="confirm-modal-cancel" class="text-button" type="button">Cancel</button>
+            <button id="confirm-modal-confirm" class="primary-button" type="button">Continue</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div id="settings-modal" class="modal" aria-hidden="true">
       <div class="modal-backdrop" data-settings-close></div>
       <div class="modal-dialog modal-dialog--settings" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
@@ -384,6 +421,17 @@
               </span>
             </label>
 
+            <label class="settings-toggle">
+              <span class="settings-toggle-copy">
+                <strong>Skip unavailable tracks automatically</strong>
+                <small>If Apollo cannot resolve a playable source, remove that song from the active queue and continue.</small>
+              </span>
+              <span class="toggle-switch">
+                <input id="settings-skip-unplayable-tracks" type="checkbox">
+                <span class="toggle-switch-ui" aria-hidden="true"></span>
+              </span>
+            </label>
+
             <div class="settings-grid">
               <label class="field">
                 <span>Default repeat mode</span>
@@ -408,6 +456,19 @@
                   <option value="1.1">1.1x</option>
                   <option value="1.25">1.25x</option>
                   <option value="1.5">1.5x</option>
+                </select>
+              </label>
+
+              <label class="field">
+                <span>Crossfade</span>
+                <select id="settings-crossfade-seconds">
+                  <option value="0">Off</option>
+                  <option value="1">1 second</option>
+                  <option value="2">2 seconds</option>
+                  <option value="4">4 seconds</option>
+                  <option value="6">6 seconds</option>
+                  <option value="8">8 seconds</option>
+                  <option value="12">12 seconds</option>
                 </select>
               </label>
             </div>
@@ -452,6 +513,17 @@
               </span>
               <span class="toggle-switch">
                 <input id="settings-muted" type="checkbox">
+                <span class="toggle-switch-ui" aria-hidden="true"></span>
+              </span>
+            </label>
+
+            <label class="settings-toggle">
+              <span class="settings-toggle-copy">
+                <strong>Volume leveling</strong>
+                <small>Applies gentle loudness smoothing so big jumps between tracks feel less abrupt.</small>
+              </span>
+              <span class="toggle-switch">
+                <input id="settings-leveling-enabled" type="checkbox">
                 <span class="toggle-switch-ui" aria-hidden="true"></span>
               </span>
             </label>
@@ -559,6 +631,28 @@
                 <span class="toggle-switch-ui" aria-hidden="true"></span>
               </span>
             </label>
+
+            <label class="settings-toggle">
+              <span class="settings-toggle-copy">
+                <strong>Auto-download remote songs on play</strong>
+                <small>Queue remote tracks for Apollo library download automatically once playback starts.</small>
+              </span>
+              <span class="toggle-switch">
+                <input id="settings-auto-download-remote-on-play" type="checkbox">
+                <span class="toggle-switch-ui" aria-hidden="true"></span>
+              </span>
+            </label>
+
+            <label class="settings-toggle">
+              <span class="settings-toggle-copy">
+                <strong>Prefer local streaming</strong>
+                <small>If Apollo already has a matching local copy, stream that instead of requesting the remote source again.</small>
+              </span>
+              <span class="toggle-switch">
+                <input id="settings-prefer-local-playback" type="checkbox">
+                <span class="toggle-switch-ui" aria-hidden="true"></span>
+              </span>
+            </label>
           </section>
 
           <section class="settings-section">
@@ -570,10 +664,21 @@
             <label class="settings-toggle">
               <span class="settings-toggle-copy">
                 <strong>Enable Discord Rich Presence</strong>
-                <small>Shows the current track, artwork when available, a Play on Apollo button, and Discord join-in-place listen along for library tracks.</small>
+                <small>Shows the current track, artwork when available, Apollo launcher buttons, and Discord join-in-place listen along for library tracks.</small>
               </span>
               <span class="toggle-switch">
                 <input id="settings-discord-enabled" type="checkbox">
+                <span class="toggle-switch-ui" aria-hidden="true"></span>
+              </span>
+            </label>
+
+            <label class="settings-toggle">
+              <span class="settings-toggle-copy">
+                <strong>Allow Listen Along Requests</strong>
+                <small>Publishes a joinable Discord listen along session for library tracks and adds a Listen Along button when Apollo can generate a public launcher link.</small>
+              </span>
+              <span class="toggle-switch">
+                <input id="settings-discord-allow-listen-along" type="checkbox">
                 <span class="toggle-switch-ui" aria-hidden="true"></span>
               </span>
             </label>
@@ -586,7 +691,7 @@
               </div>
             </div>
 
-              <p class="field-message">Apollo uses its built-in Discord app by default. Discord join and invite flows now happen from Discord itself, not from an Apollo button. The optional Play on Apollo button only appears when this client is using a non-localhost Apollo server URL, and library listen along depends on both users being connected to the same Apollo server.</p>
+              <p class="field-message">Apollo uses its built-in Discord app by default. Listen Along currently uses broker-assisted peer-to-peer networking: joining can still expose network addresses between peers, and some NATs will still block the direct media path.</p>
           </section>
 
           <p id="settings-form-message" class="field-message"></p>

@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -16,6 +17,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#define NOMINMAX
+#include <windows.h>
+#include <wincrypt.h>
 
 namespace {
 
@@ -43,6 +48,7 @@ struct PresencePayload {
     std::string album;
     std::string provider;
     std::string buttonUrl;
+    std::string listenAlongButtonUrl;
     std::string artworkUrl;
     std::string status;
     std::string partyId;
@@ -78,6 +84,52 @@ struct HelperState {
 };
 
 HelperState* gState = nullptr;
+constexpr uintmax_t kMaxLogFileBytes = 4 * 1024 * 1024;
+
+bool tryParseInt(const std::string& value, int& parsed) {
+    try {
+        size_t consumed = 0;
+        const long long numeric = std::stoll(value, &consumed, 10);
+        if (consumed != value.size() || numeric < std::numeric_limits<int>::min() || numeric > std::numeric_limits<int>::max()) {
+            return false;
+        }
+
+        parsed = static_cast<int>(numeric);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool tryParseLongLong(const std::string& value, long long& parsed) {
+    try {
+        size_t consumed = 0;
+        const long long numeric = std::stoll(value, &consumed, 10);
+        if (consumed != value.size()) {
+            return false;
+        }
+
+        parsed = numeric;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool tryParseUInt64(const std::string& value, uint64_t& parsed) {
+    try {
+        size_t consumed = 0;
+        const unsigned long long numeric = std::stoull(value, &consumed, 10);
+        if (consumed != value.size()) {
+            return false;
+        }
+
+        parsed = static_cast<uint64_t>(numeric);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
 
 void appendLog(const std::string& message) {
     if (!gState || gState->logFilePath.empty()) {
@@ -86,6 +138,14 @@ void appendLog(const std::string& message) {
 
     std::error_code error;
     std::filesystem::create_directories(std::filesystem::path(gState->logFilePath).parent_path(), error);
+    const auto logPath = std::filesystem::path(gState->logFilePath);
+    const uintmax_t currentSize = std::filesystem::exists(logPath, error)
+        ? std::filesystem::file_size(logPath, error)
+        : 0;
+
+    if (!error && currentSize >= kMaxLogFileBytes) {
+        std::ofstream truncateStream(gState->logFilePath, std::ios::trunc);
+    }
 
     std::ofstream stream(gState->logFilePath, std::ios::app);
     if (!stream.is_open()) {
@@ -254,6 +314,75 @@ std::string base64Decode(const std::string& encoded) {
     return decoded;
 }
 
+std::string base64Encode(const std::string& decoded) {
+    static const char alphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    std::string encoded;
+    encoded.reserve(((decoded.size() + 2) / 3) * 4);
+
+    int value = 0;
+    int bits = -6;
+    for (const unsigned char character : decoded) {
+        value = (value << 8) + character;
+        bits += 8;
+
+        while (bits >= 0) {
+            encoded.push_back(alphabet[(value >> bits) & 0x3F]);
+            bits -= 6;
+        }
+    }
+
+    if (bits > -6) {
+        encoded.push_back(alphabet[((value << 8) >> (bits + 8)) & 0x3F]);
+    }
+
+    while (encoded.size() % 4 != 0) {
+        encoded.push_back('=');
+    }
+
+    return encoded;
+}
+
+std::optional<std::string> protectTokenPayload(const std::string& payload) {
+    if (payload.empty()) {
+        return std::string {};
+    }
+
+    DATA_BLOB inputBlob {};
+    inputBlob.pbData = reinterpret_cast<BYTE*>(const_cast<char*>(payload.data()));
+    inputBlob.cbData = static_cast<DWORD>(payload.size());
+
+    DATA_BLOB outputBlob {};
+    if (!CryptProtectData(&inputBlob, L"Apollo Discord Social Token", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &outputBlob)) {
+        return std::nullopt;
+    }
+
+    std::string encrypted(reinterpret_cast<const char*>(outputBlob.pbData), outputBlob.cbData);
+    LocalFree(outputBlob.pbData);
+    return base64Encode(encrypted);
+}
+
+std::optional<std::string> unprotectTokenPayload(const std::string& payload) {
+    if (payload.empty()) {
+        return std::string {};
+    }
+
+    const std::string decoded = base64Decode(payload);
+    DATA_BLOB inputBlob {};
+    inputBlob.pbData = reinterpret_cast<BYTE*>(const_cast<char*>(decoded.data()));
+    inputBlob.cbData = static_cast<DWORD>(decoded.size());
+
+    DATA_BLOB outputBlob {};
+    if (!CryptUnprotectData(&inputBlob, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &outputBlob)) {
+        return std::nullopt;
+    }
+
+    std::string decrypted(reinterpret_cast<const char*>(outputBlob.pbData), outputBlob.cbData);
+    LocalFree(outputBlob.pbData);
+    return decrypted;
+}
+
 std::vector<std::string> splitTabs(const std::string& line) {
     std::vector<std::string> parts;
     size_t start = 0;
@@ -383,8 +512,22 @@ TokenRecord loadToken() {
         return record;
     }
 
+    std::stringstream buffer;
+    buffer << stream.rdbuf();
+    std::string contents = buffer.str();
+    if (contents.rfind("dpapi:", 0) == 0) {
+        const auto decrypted = unprotectTokenPayload(contents.substr(6));
+        if (!decrypted.has_value()) {
+            appendLog("[startup] unable to decrypt cached token");
+            return record;
+        }
+
+        contents = *decrypted;
+    }
+
+    std::stringstream tokenStream(contents);
     std::string line;
-    while (std::getline(stream, line)) {
+    while (std::getline(tokenStream, line)) {
         const size_t separator = line.find('=');
         if (separator == std::string::npos) {
             continue;
@@ -394,7 +537,10 @@ TokenRecord loadToken() {
         const std::string value = line.substr(separator + 1);
 
         if (key == "tokenType") {
-            record.tokenType = std::stoi(value);
+            int tokenType = record.tokenType;
+            if (tryParseInt(value, tokenType)) {
+                record.tokenType = tokenType;
+            }
         } else if (key == "accessToken") {
             record.accessToken = value;
         } else if (key == "refreshToken") {
@@ -402,7 +548,10 @@ TokenRecord loadToken() {
         } else if (key == "scopes") {
             record.scopes = value;
         } else if (key == "expiresAtMs") {
-            record.expiresAtMs = std::stoll(value);
+            long long expiresAtMs = 0;
+            if (tryParseLongLong(value, expiresAtMs)) {
+                record.expiresAtMs = expiresAtMs;
+            }
         }
     }
 
@@ -417,17 +566,26 @@ void saveToken(const TokenRecord& record) {
 
     std::filesystem::create_directories(std::filesystem::path(gState->tokenFilePath).parent_path());
 
-    std::ofstream stream(gState->tokenFilePath, std::ios::trunc);
-    if (!stream.is_open()) {
-        return;
-    }
-
-    stream
+    std::ostringstream serialised;
+    serialised
         << "tokenType=" << record.tokenType << '\n'
         << "accessToken=" << record.accessToken << '\n'
         << "refreshToken=" << record.refreshToken << '\n'
         << "scopes=" << record.scopes << '\n'
         << "expiresAtMs=" << record.expiresAtMs << '\n';
+
+    const auto protectedPayload = protectTokenPayload(serialised.str());
+    if (!protectedPayload.has_value()) {
+        appendLog("[startup] unable to encrypt cached token");
+        return;
+    }
+
+    std::ofstream stream(gState->tokenFilePath, std::ios::trunc);
+    if (!stream.is_open()) {
+        return;
+    }
+
+    stream << "dpapi:" << *protectedPayload;
 }
 
 void clearStoredToken() {
@@ -706,6 +864,10 @@ void startAuthorization() {
 }
 
 std::string presenceDetailsText(const PresencePayload& payload) {
+    if (!payload.title.empty()) {
+        return payload.title;
+    }
+
     if (!payload.artist.empty()) {
         return payload.artist;
     }
@@ -718,6 +880,10 @@ std::string presenceDetailsText(const PresencePayload& payload) {
 }
 
 std::string presenceStateText(const PresencePayload& payload) {
+    if (!payload.artist.empty()) {
+        return payload.artist;
+    }
+
     return "";
 }
 
@@ -735,7 +901,7 @@ void applyPresence() {
     Discord_Activity_Init(&activity);
     Discord_Activity_SetType(&activity, Discord_ActivityTypes_Listening);
 
-    const auto nameField = optionalActivityField(gState->presence.title, 2, 128);
+    const auto nameField = optionalActivityField("Apollo", 2, 128);
     if (nameField.has_value()) {
         Discord_Activity_SetName(&activity, makeDiscordString(*nameField));
     }
@@ -756,13 +922,9 @@ void applyPresence() {
     Discord_ActivityAssets_Init(&assets);
     bool hasAssets = false;
     const std::string artworkUrl = trimmedText(gState->presence.artworkUrl, 512);
-    const auto largeImageTextField = optionalActivityField(
-        gState->presence.artist.empty()
-            ? gState->presence.title
-            : gState->presence.title + " | " + gState->presence.artist,
-        2,
-        128
-    );
+    const auto largeImageTextField = artworkUrl.empty()
+        ? optionalActivityField(gState->assets.largeImageText, 2, 128)
+        : std::optional<std::string> {};
 
     if (!artworkUrl.empty() && looksLikeSupportedImageUrl(artworkUrl)) {
         Discord_String artworkImage = makeDiscordString(artworkUrl);
@@ -779,7 +941,7 @@ void applyPresence() {
     const std::string largeImageText =
         largeImageTextField.has_value()
             ? *largeImageTextField
-            : gState->assets.largeImageText;
+            : "";
 
     if (!largeImageText.empty()) {
         Discord_String largeText = makeDiscordString(largeImageText);
@@ -835,6 +997,16 @@ void applyPresence() {
         Discord_Activity_SetSecrets(&activity, &secrets);
     }
 
+    const std::string listenAlongButtonUrl = trimmedText(gState->presence.listenAlongButtonUrl, 256);
+    if (!listenAlongButtonUrl.empty() && looksLikeSupportedButtonUrl(listenAlongButtonUrl)) {
+        Discord_ActivityButton button {};
+        Discord_ActivityButton_Init(&button);
+        Discord_ActivityButton_SetLabel(&button, makeDiscordString("Listen Along"));
+        Discord_ActivityButton_SetUrl(&button, makeDiscordString(listenAlongButtonUrl));
+        Discord_Activity_AddButton(&activity, &button);
+        Discord_ActivityButton_Drop(&button);
+    }
+
     const std::string buttonUrl = trimmedText(gState->presence.buttonUrl, 256);
     if (!buttonUrl.empty() && looksLikeSupportedButtonUrl(buttonUrl)) {
         Discord_ActivityButton button {};
@@ -858,6 +1030,8 @@ void applyPresence() {
         + std::to_string(joinSecretField.has_value() ? joinSecretField->size() : 0)
         + " artwork_len="
         + std::to_string(artworkUrl.size())
+        + " listen_button_len="
+        + std::to_string(listenAlongButtonUrl.size())
         + " button_len="
         + std::to_string(buttonUrl.size())
     );
@@ -1030,7 +1204,16 @@ void sendInvite(const std::string& requestId, const std::string& userId, const s
         return;
     }
 
-    const auto parsedUserId = static_cast<uint64_t>(std::stoull(userId));
+    uint64_t parsedUserId = 0;
+    if (!tryParseUInt64(userId, parsedUserId) || !parsedUserId) {
+        emitLine(
+            "{\"type\":\"invite-result\",\"requestId\":\""
+            + escapeJson(requestId)
+            + "\",\"success\":false,\"message\":\"Invalid Discord user ID.\"}"
+        );
+        return;
+    }
+
     Discord_Client_SendActivityInvite(
         &gState->client,
         parsedUserId,
@@ -1087,6 +1270,20 @@ void processCommand(const std::vector<std::string>& parts) {
     }
 
     if (command == "set_presence" && parts.size() >= 13) {
+        long long currentTimeMs = 0;
+        long long durationMs = 0;
+        int partySize = 0;
+        int partyMax = 0;
+        if (
+            !tryParseLongLong(parts[7], currentTimeMs)
+            || !tryParseLongLong(parts[8], durationMs)
+            || !tryParseInt(parts[10], partySize)
+            || !tryParseInt(parts[11], partyMax)
+        ) {
+            appendLog("[command] invalid presence numeric payload");
+            return;
+        }
+
         gState->presence.hasPresence = true;
         gState->presence.title = base64Decode(parts[1]);
         gState->presence.artist = base64Decode(parts[2]);
@@ -1094,13 +1291,14 @@ void processCommand(const std::vector<std::string>& parts) {
         gState->presence.provider = base64Decode(parts[4]);
         gState->presence.buttonUrl = base64Decode(parts[5]);
         gState->presence.status = parts[6];
-        gState->presence.currentTimeMs = std::stoll(parts[7]);
-        gState->presence.durationMs = std::stoll(parts[8]);
+        gState->presence.currentTimeMs = currentTimeMs;
+        gState->presence.durationMs = durationMs;
         gState->presence.partyId = base64Decode(parts[9]);
-        gState->presence.partySize = std::stoi(parts[10]);
-        gState->presence.partyMax = std::stoi(parts[11]);
+        gState->presence.partySize = partySize;
+        gState->presence.partyMax = partyMax;
         gState->presence.joinSecret = base64Decode(parts[12]);
         gState->presence.artworkUrl = parts.size() >= 14 ? base64Decode(parts[13]) : "";
+        gState->presence.listenAlongButtonUrl = parts.size() >= 15 ? base64Decode(parts[14]) : "";
         applyPresence();
         return;
     }
@@ -1189,14 +1387,24 @@ int main(int argc, char** argv) {
     for (int index = 1; index < argc; index += 1) {
         const std::string argument = argv[index];
         if (argument == "--app-id" && index + 1 < argc) {
-            state.applicationId = static_cast<uint64_t>(std::stoull(argv[++index]));
+            uint64_t applicationId = 0;
+            if (!tryParseUInt64(argv[++index], applicationId)) {
+                emitLine("{\"type\":\"fatal\",\"message\":\"Invalid Discord application ID.\"}");
+                return 1;
+            }
+            state.applicationId = applicationId;
         } else if (argument == "--token-file" && index + 1 < argc) {
             state.tokenFilePath = argv[++index];
             state.logFilePath = std::filesystem::path(state.tokenFilePath).parent_path().string() + "\\discord-social-helper.log";
         } else if (argument == "--launch-command" && index + 1 < argc) {
             state.launchCommand = argv[++index];
         } else if (argument == "--game-pid" && index + 1 < argc) {
-            state.gameWindowPid = std::stoi(argv[++index]);
+            int gameWindowPid = 0;
+            if (!tryParseInt(argv[++index], gameWindowPid)) {
+                emitLine("{\"type\":\"fatal\",\"message\":\"Invalid game window PID.\"}");
+                return 1;
+            }
+            state.gameWindowPid = gameWindowPid;
         }
     }
 

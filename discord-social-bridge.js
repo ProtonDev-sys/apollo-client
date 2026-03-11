@@ -101,6 +101,37 @@ function createDiscordSocialBridge({
 
   const pendingRequests = new Map();
 
+  function rejectPendingRequests(message) {
+    const error = new Error(message);
+
+    for (const pending of pendingRequests.values()) {
+      pending.reject(error);
+    }
+
+    pendingRequests.clear();
+  }
+
+  function sendRequest(createCommand, unavailableMessage = "Discord helper is unavailable.") {
+    start();
+    const requestId = nextRequestId();
+
+    return new Promise((resolve, reject) => {
+      pendingRequests.set(requestId, {
+        resolve,
+        reject
+      });
+
+      const command = typeof createCommand === "function"
+        ? createCommand(requestId)
+        : [];
+
+      if (!sendCommand(command)) {
+        pendingRequests.delete(requestId);
+        reject(new Error(unavailableMessage));
+      }
+    });
+  }
+
   function resolvePendingRequest(type, payload) {
     if (!payload?.requestId || !pendingRequests.has(payload.requestId)) {
       return;
@@ -188,10 +219,6 @@ function createDiscordSocialBridge({
       const message = chunk.toString("utf8").trim();
       if (message) {
         log(`stderr ${message}`);
-        emitState({
-          helperRunning: true,
-          message: normaliseText(message, 240)
-        });
       }
     });
 
@@ -200,11 +227,7 @@ function createDiscordSocialBridge({
       helperProcess = null;
       helperStdoutBuffer = "";
       helperExitPromise = null;
-
-      for (const pending of pendingRequests.values()) {
-        pending.reject(new Error("Discord helper stopped."));
-      }
-      pendingRequests.clear();
+      rejectPendingRequests("Discord helper stopped.");
 
       emitState({
         helperRunning: false,
@@ -288,7 +311,8 @@ function createDiscordSocialBridge({
       String(Math.max(0, Math.round(Number(playback.partySize || 0)))),
       String(Math.max(0, Math.round(Number(playback.partyMax || 0)))),
       encodeField(playback.joinSecret),
-      encodeField(playback.artworkUrl)
+      encodeField(playback.artworkUrl),
+      encodeField(playback.listenAlongButtonUrl)
     ]);
   }
 
@@ -340,15 +364,7 @@ function createDiscordSocialBridge({
       return Promise.resolve([]);
     }
 
-    start();
-    const requestId = nextRequestId();
-    return new Promise((resolve, reject) => {
-      pendingRequests.set(requestId, { resolve, reject });
-      if (!sendCommand(["list_friends", requestId])) {
-        pendingRequests.delete(requestId);
-        reject(new Error("Discord helper is unavailable."));
-      }
-    });
+    return sendRequest((requestId) => ["list_friends", requestId]);
   }
 
   function sendActivityInvite({ userId, content }) {
@@ -357,20 +373,12 @@ function createDiscordSocialBridge({
     }
 
     log(`sendActivityInvite userId=${String(userId || "")}`);
-    start();
-    const requestId = nextRequestId();
-    return new Promise((resolve, reject) => {
-      pendingRequests.set(requestId, { resolve, reject });
-      if (!sendCommand([
+    return sendRequest((requestId) => [
         "invite",
         requestId,
         String(userId || ""),
         encodeField(content || "Listen along on Apollo")
-      ])) {
-        pendingRequests.delete(requestId);
-        reject(new Error("Discord helper is unavailable."));
-      }
-    });
+      ]);
   }
 
   async function destroy() {

@@ -133,18 +133,25 @@ export function createPluginHost(sharedApi) {
         continue;
       }
 
-      const api = createPluginApi(plugin);
-      pluginApis.set(plugin.id, api);
-      const dispose = await plugin.setup(api);
+      try {
+        const api = createPluginApi(plugin);
+        pluginApis.set(plugin.id, api);
+        const dispose = await plugin.setup(api);
 
-      if (typeof dispose === "function") {
-        api.onDispose(dispose);
+        if (typeof dispose === "function") {
+          api.onDispose(dispose);
+        }
+
+        plugins.push({
+          id: plugin.id,
+          name: plugin.name || plugin.id
+        });
+      } catch (error) {
+        pluginDisposers.get(plugin.id)?.();
+        pluginDisposers.delete(plugin.id);
+        pluginApis.delete(plugin.id);
+        console.warn(`[apollo-plugin-host] failed to load plugin "${plugin.id}"`, error);
       }
-
-      plugins.push({
-        id: plugin.id,
-        name: plugin.name || plugin.id
-      });
     }
 
     emit("plugins:loaded", {

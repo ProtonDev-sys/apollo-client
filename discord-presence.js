@@ -53,6 +53,7 @@ function sanitisePlayback(playback) {
     provider: cleanText(playback.provider),
     artworkUrl: cleanText(playback.artworkUrl, 2048),
     buttonUrl: cleanText(playback.buttonUrl, 2048),
+    listenAlongButtonUrl: cleanText(playback.listenAlongButtonUrl, 2048),
     partyId: cleanText(playback.partyId, 128),
     partySize: Math.max(0, Math.round(cleanNumber(playback.partySize))),
     partyMax: Math.max(0, Math.round(cleanNumber(playback.partyMax))),
@@ -82,29 +83,18 @@ function buildActivity(config, playback, appName) {
   }
 
   const statusLabel = getStatusLabel(playback.status);
-  const stateParts = playback.status === "playing" ? [] : [statusLabel];
-
-  if (playback.artist) {
-    stateParts.push(playback.artist);
-  }
-
-  if (playback.album) {
-    stateParts.push(playback.album);
-  }
-
-  if (playback.provider) {
-    stateParts.push(playback.provider);
-  }
+  const stateText = playback.status === "playing"
+    ? playback.artist
+    : [statusLabel, playback.artist].filter(Boolean).join(" | ");
 
   const activity = {
     details: playback.title,
-    state: cleanText(stateParts.join(" | "), 128),
+    state: cleanText(stateText, 128),
     instance: false
   };
 
   if (playback.artworkUrl) {
     activity.largeImageKey = playback.artworkUrl;
-    activity.largeImageText = cleanText(`${playback.title} | ${playback.artist}`, 128);
   } else if (config.largeImageKey) {
     activity.largeImageKey = config.largeImageKey;
     activity.largeImageText = config.largeImageText || appName;
@@ -121,19 +111,29 @@ function buildActivity(config, playback, appName) {
     activity.smallImageText = statusLabel;
   }
 
-  if (playback.status === "playing" && playback.duration > 0 && playback.playbackRate === 1) {
-    const remainingSeconds = Math.max(0, playback.duration - playback.currentTime);
+  if (playback.status === "playing" && playback.duration > 0) {
+    const remainingSeconds = Math.max(0, (playback.duration - playback.currentTime) / Math.max(playback.playbackRate || 1, 0.25));
     activity.startTimestamp = new Date(Date.now() - Math.round(playback.currentTime * 1000));
     activity.endTimestamp = new Date(Date.now() + Math.round(remainingSeconds * 1000));
   }
 
+  const buttons = [];
+  if (playback.listenAlongButtonUrl) {
+    buttons.push({
+      label: "Listen Along",
+      url: playback.listenAlongButtonUrl
+    });
+  }
+
   if (playback.buttonUrl) {
-    activity.buttons = [
-      {
-        label: "Play on Apollo",
-        url: playback.buttonUrl
-      }
-    ];
+    buttons.push({
+      label: "Play on Apollo",
+      url: playback.buttonUrl
+    });
+  }
+
+  if (buttons.length) {
+    activity.buttons = buttons.slice(0, 2);
   }
 
   if (playback.partyId) {

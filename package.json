@@ -1,6 +1,6 @@
 {
   "name": "apollo-client",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Desktop client shell for the Apollo music server.",
   "main": "main.js",
   "scripts": {
@@ -59,6 +59,7 @@
     "electron-builder": "^26.8.1"
   },
   "dependencies": {
-    "discord-rpc": "^4.0.1"
+    "discord-rpc": "^4.0.1",
+    "mqtt": "^5.15.0"
   }
 }

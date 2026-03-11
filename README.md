@@ -52,6 +52,71 @@ Bash:
 APOLLO_SERVER_URL="http://127.0.0.1:4848" npm start
 ```
 
+### App config
+
+Apollo can load an external `apollo.config.json` file for runtime theme selection and overrides. The loader checks these locations in order and uses the first file it finds:
+
+- `APOLLO_CONFIG_PATH`
+- `apollo.config.json` next to the installed executable
+- `apollo.config.json` in the current working directory
+- `apollo.config.json` in the Electron user-data directory
+- `apollo.config.json` next to the app source during local development
+
+Themes are now disk-backed runtime assets. Apollo seeds `default-theme.json` into the user-data `themes/` directory on first run, and you can swap to any theme file there or in another configured theme directory without rebuilding the app.
+
+Theme config supports:
+
+- `theme.id`, `theme.name`, `theme.file`, or `theme.path` to select a JSON or CSS theme file
+- inline `theme.variables` and `theme.css` overrides
+- optional `theme.fonts.ui` and `theme.fonts.mono`
+
+```json
+{
+  "theme": {
+    "id": "default-theme",
+    "fonts": {
+      "ui": "\"Aptos\", sans-serif",
+      "mono": "\"JetBrains Mono\", monospace"
+    },
+    "variables": {
+      "bg": "#101418",
+      "surface": "#162029",
+      "surface-2": "#1c2833",
+      "text": "#f3f7fb",
+      "muted": "#9fb0bf",
+      "accent": "#7dd3fc",
+      "progress": "#7dd3fc",
+      "border": "rgba(255, 255, 255, 0.12)",
+      "shadow": "0 24px 80px rgba(0, 0, 0, 0.38)"
+    },
+    "css": ".artist-search-mark { background: linear-gradient(145deg, #0f172a, #1d4ed8); }"
+  }
+}
+```
+
+Variable keys can be written with or without the `--` prefix.
+
+### Runtime plugins
+
+Plugins are also disk-backed runtime assets now. Apollo seeds `lyrics-plugin.js` into the user-data `plugins/` directory on first run and loads `.js` plugins from these directories:
+
+- `APOLLO_PLUGIN_DIR`
+- `plugins/` next to the installed executable
+- `plugins/` in the current working directory
+- `plugins/` in the Electron user-data directory
+
+Renderer-side plugin and theme directories are watched. Editing a plugin or theme file reloads it without rebuilding the app.
+
+### Logs
+
+Apollo writes a shared client log to the Electron user-data directory:
+
+- `apollo-client.log`
+
+Discord bridge logging still writes:
+
+- `apollo-discord.log`
+
 ### Discord Rich Presence
 
 Discord Rich Presence ships with Apollo's default Discord application ID. You can keep that default in the settings UI or override it locally through environment variables:

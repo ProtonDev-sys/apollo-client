@@ -2,6 +2,7 @@ node_modules/
 dist/
 out/
 release/
+release-unpacked-runtime/
 SDK/
 native-bin/
 server-inspect/

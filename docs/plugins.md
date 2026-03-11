@@ -14,14 +14,14 @@ Plugins can now:
 - subscribe to app lifecycle and playback events
 - access the DOM, browser APIs, and the desktop bridge already exposed in preload
 
-Plugins are currently loaded as built-in modules from `src/plugins/index.js`. There is no external marketplace or sandbox.
+Plugins are loaded at runtime from disk-backed `.js` modules. Apollo seeds first-party plugins into the user-data `plugins/` directory on first run, then loads plugins from the configured runtime directories.
 
 ## Architecture
 
-- Plugins are plain ES modules loaded by the renderer.
+- Plugins are plain ES modules loaded by the renderer with dynamic `import(...)`.
 - The host lives in `src/plugin-host.js`.
 - The renderer builds the broad runtime surface in `src/renderer.js`.
-- Built-in plugins are registered in `src/plugins/index.js`.
+- The preload bridge discovers runtime plugin files and reports them to the renderer.
 
 ## Plugin Module Shape
 
@@ -377,14 +377,14 @@ export default automationPlugin;
 
 ## Registering a Plugin
 
-Add the module under `src/plugins/` and include it in `src/plugins/index.js`.
+Drop a trusted `.js` ES module into one of the runtime plugin directories:
 
-```js
-import lyricsPlugin from "./lyrics-plugin.js";
-import automationPlugin from "./automation-plugin.js";
+- `APOLLO_PLUGIN_DIR`
+- `plugins/` next to the installed executable
+- `plugins/` in the current working directory
+- `plugins/` in the Electron user-data directory
 
-export const builtinPlugins = [lyricsPlugin, automationPlugin];
-```
+Apollo watches those directories and reloads plugins when files change.
 
 ## Safety Guidance
 
