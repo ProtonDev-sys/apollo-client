@@ -983,7 +983,7 @@ body:not(.window-is-focused) .window-topbar {
 }
 
 .detail-tab.is-active::after {
-  background: var(--text);
+  background: transparent;
 }
 
 .detail-panel-body {
@@ -1132,6 +1132,7 @@ body:not(.window-is-focused) .window-topbar {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  padding: 0 10px 12px;
 }
 
 .queue-panel--empty {

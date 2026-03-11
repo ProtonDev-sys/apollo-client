@@ -80,7 +80,8 @@ const LISTEN_ALONG_HOST_WARNING = "Listen Along currently creates a broker-assis
 const SEARCH_HISTORY_GROUP_WINDOW_MS = 1500;
 const NAVIGATION_INPUT_DEDUPE_MS = 400;
 const LIBRARY_REFRESH_FOCUS_COOLDOWN_MS = 30 * 1000;
-const PROVIDER_ID_KEYS = ["spotify", "youtube", "soundcloud", "itunes", "isrc"];
+const PROVIDER_ID_KEYS = ["spotify", "youtube", "soundcloud", "itunes", "deezer", "isrc"];
+const APOLLO_SHAREABLE_PROVIDER_ID_KEYS = ["spotify", "deezer", "youtube", "itunes"];
 const PLAYBACK_URL_CACHE_TTL_MS = 5 * 60 * 1000;
 const DURATION_CACHE_STORAGE_KEY = "apollo-duration-cache-v1";
 const LIBRARY_SNAPSHOT_STORAGE_KEY = "apollo-library-snapshot-v1";
@@ -357,6 +358,8 @@ const navigationBackStack = [];
 const navigationForwardStack = [];
 let libraryRefreshInFlight = null;
 let lastLibraryRefreshAt = 0;
+const activeDownloadWatchers = new Map();
+const DOWNLOAD_STATUS_POLL_MS = 1500;
 
 const workspace = document.querySelector("#workspace");
 const sidebarPanel = document.querySelector("#sidebar-panel");
@@ -1140,6 +1143,120 @@ function normaliseMetadataText(value) {
     .toLowerCase();
 }
 
+function normaliseTrackArtists(artists, fallbackArtist = "") {
+  const fallback = String(fallbackArtist || "").trim();
+  if (Array.isArray(artists)) {
+    const nextArtists = artists
+      .map((artist) => String(artist || "").trim())
+      .filter(Boolean);
+    return nextArtists.length ? nextArtists : (fallback ? [fallback] : []);
+  }
+
+  const trimmedArtists = String(artists || "").trim();
+  if (!trimmedArtists) {
+    return fallback ? [fallback] : [];
+  }
+
+  const nextArtists = trimmedArtists
+    .split(/\s*,\s*/)
+    .map((artist) => artist.trim())
+    .filter(Boolean);
+  return nextArtists.length ? nextArtists : [trimmedArtists];
+}
+
+function normaliseTrackNumberTag(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return Math.trunc(value);
+  }
+
+  const match = String(value).match(/(\d{1,4})/);
+  if (!match) {
+    return null;
+  }
+
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function normaliseTrackReleaseDate(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const fullDate = trimmed.match(/^(\d{4})[-/](\d{2})[-/](\d{2})$/);
+  if (fullDate) {
+    return `${fullDate[1]}-${fullDate[2]}-${fullDate[3]}`;
+  }
+
+  const monthDate = trimmed.match(/^(\d{4})[-/](\d{2})$/);
+  if (monthDate) {
+    return `${monthDate[1]}-${monthDate[2]}`;
+  }
+
+  const yearOnly = trimmed.match(/^(\d{4})$/);
+  if (yearOnly) {
+    return yearOnly[1];
+  }
+
+  const isoLike = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})T/);
+  if (isoLike) {
+    return `${isoLike[1]}-${isoLike[2]}-${isoLike[3]}`;
+  }
+
+  return "";
+}
+
+function normaliseTrackExplicitFlag(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  const comparable = normaliseMetadataText(value);
+  if (!comparable) {
+    return null;
+  }
+
+  if (["true", "yes", "1", "explicit"].includes(comparable)) {
+    return true;
+  }
+
+  if (["false", "no", "0", "clean"].includes(comparable)) {
+    return false;
+  }
+
+  return null;
+}
+
+function buildTrackMetadataSnapshot(track = {}) {
+  const artist = String(track.artist || "").trim();
+  const releaseDate = normaliseTrackReleaseDate(track.releaseDate || track.releaseYear || "");
+  const releaseYearMatch = releaseDate.match(/^(\d{4})/);
+  const explicit = normaliseTrackExplicitFlag(track.explicit);
+  const sourcePlatform = String(track.sourcePlatform || track.provider || "").trim();
+
+  return {
+    artists: normaliseTrackArtists(track.artists, artist),
+    albumArtist: String(track.albumArtist || "").trim() || artist,
+    trackNumber: normaliseTrackNumberTag(track.trackNumber),
+    discNumber: normaliseTrackNumberTag(track.discNumber),
+    releaseDate,
+    releaseYear: normaliseTrackNumberTag(track.releaseYear)
+      || (releaseYearMatch ? Number.parseInt(releaseYearMatch[1], 10) : null),
+    genre: Array.isArray(track.genre)
+      ? track.genre.map((value) => String(value || "").trim()).filter(Boolean).join(", ")
+      : String(track.genre || "").trim(),
+    explicit,
+    sourcePlatform,
+    sourceUrl: String(track.sourceUrl || "").trim(),
+    isrc: String(track.isrc || track.providerIds?.isrc || "").trim()
+  };
+}
+
 function getTrackNormalizedDuration(track) {
   const value = Number(track?.normalizedDuration ?? track?.duration ?? 0);
   return Number.isFinite(value) && value > 0 ? value : 0;
@@ -1664,18 +1781,30 @@ function isFallbackTrack(track) {
 }
 
 function serialiseTrack(track) {
+  const metadata = buildTrackMetadataSnapshot(track);
   return {
     key: track.key,
     id: track.id,
     trackId: track.trackId || null,
     title: track.title || "Unknown Title",
     artist: track.artist || "Unknown Artist",
+    artists: metadata.artists,
     album: track.album || "",
+    albumArtist: metadata.albumArtist,
+    trackNumber: metadata.trackNumber,
+    discNumber: metadata.discNumber,
     duration: track.duration || null,
+    releaseDate: metadata.releaseDate,
+    releaseYear: metadata.releaseYear,
+    genre: metadata.genre,
+    explicit: metadata.explicit,
     artwork: track.artwork || "",
     providerIds: normaliseProviderIds(track.providerIds),
+    isrc: metadata.isrc,
     provider: track.provider || "remote",
+    sourcePlatform: metadata.sourcePlatform,
     resultSource: track.resultSource || "remote",
+    sourceUrl: metadata.sourceUrl,
     externalUrl: track.externalUrl || "",
     downloadTarget: track.downloadTarget || "",
     normalizedTitle: track.normalizedTitle || getTrackNormalizedText(track, "normalizedTitle", "title"),
@@ -1792,6 +1921,7 @@ function restorePersistedQueueState(savedQueue, savedState = {}) {
 
 function normaliseLibraryTrack(track) {
   const trackId = track.trackId || track.id;
+  const metadata = buildTrackMetadataSnapshot(track);
 
   return {
     key: buildTrackKey("library", trackId),
@@ -1799,12 +1929,23 @@ function normaliseLibraryTrack(track) {
     trackId,
     title: track.title || "Unknown Title",
     artist: track.artist || "Unknown Artist",
+    artists: metadata.artists,
     album: track.album || "",
+    albumArtist: metadata.albumArtist,
+    trackNumber: metadata.trackNumber,
+    discNumber: metadata.discNumber,
     duration: track.duration || null,
+    releaseDate: metadata.releaseDate,
+    releaseYear: metadata.releaseYear,
+    genre: metadata.genre,
+    explicit: metadata.explicit,
     artwork: track.artwork || "",
     providerIds: normaliseProviderIds(track.providerIds),
+    isrc: metadata.isrc,
     provider: "library",
+    sourcePlatform: metadata.sourcePlatform || "library",
     resultSource: "library",
+    sourceUrl: metadata.sourceUrl,
     externalUrl: track.externalUrl || `${currentApiBase}/stream/${trackId}`,
     downloadTarget: track.downloadTarget || `${currentApiBase}/stream/${trackId}?download=1`,
     normalizedTitle: track.normalizedTitle || getTrackNormalizedText(track, "normalizedTitle", "title"),
@@ -1818,18 +1959,30 @@ function normaliseLibraryTrack(track) {
 }
 
 function normaliseRemoteTrack(track) {
+  const metadata = buildTrackMetadataSnapshot(track);
   return {
     key: buildTrackKey(track.provider || "remote", track.id),
     id: track.id,
     trackId: null,
     title: track.title || "Unknown Title",
     artist: track.artist || "Unknown Artist",
+    artists: metadata.artists,
     album: track.album || "",
+    albumArtist: metadata.albumArtist,
+    trackNumber: metadata.trackNumber,
+    discNumber: metadata.discNumber,
     duration: track.duration || null,
+    releaseDate: metadata.releaseDate,
+    releaseYear: metadata.releaseYear,
+    genre: metadata.genre,
+    explicit: metadata.explicit,
     artwork: track.artwork || "",
     providerIds: normaliseProviderIds(track.providerIds),
+    isrc: metadata.isrc,
     provider: track.provider || "remote",
+    sourcePlatform: metadata.sourcePlatform,
     resultSource: "remote",
+    sourceUrl: metadata.sourceUrl,
     externalUrl: track.externalUrl || "",
     downloadTarget: track.downloadTarget || track.externalUrl || "",
     normalizedTitle: track.normalizedTitle || getTrackNormalizedText(track, "normalizedTitle", "title"),
@@ -2955,6 +3108,8 @@ function createQueueMenu(queueEntry, isCurrent) {
 }
 
 function renderQueuePanel(panelBody) {
+  state.activeQueueMenuId = "";
+  state.activeQueueMenuAnchor = null;
   document.querySelectorAll(".queue-menu-popover--portal").forEach((menu) => menu.remove());
   const currentTrack = getPlaybackTrack();
   const upcomingEntries = getOrderedUpcomingQueueEntries();
@@ -3214,21 +3369,11 @@ function renderQueuePanel(panelBody) {
 
       event.preventDefault();
       event.stopPropagation();
-      closeActiveMenu();
-      state.activeQueueMenuId = queueEntry.id;
-      state.activeQueueMenuAnchor = {
+      openQueueMenu(row, queueEntry, isCurrent, {
         x: event.clientX,
         y: event.clientY
-      };
-      renderDetailPanel();
+      });
     });
-
-    if (!isCurrent && state.activeQueueMenuId === queueEntry.id) {
-      const menu = createQueueMenu(queueEntry, isCurrent);
-      menu.classList.add("queue-menu-popover--portal");
-      document.body.append(menu);
-      positionActiveMenu(row, menu, state.activeQueueMenuAnchor);
-    }
 
     queueList.append(row);
   });
@@ -3891,7 +4036,7 @@ function ensureAudioLevelingGraph() {
     audioLevelingSourceNode = null;
     audioLevelingInputNode = null;
     audioLevelingCompressorNode = null;
-    logClient("audio", "volume leveling unavailable", {
+    logClient("audio", "audio normalization unavailable", {
       error: error?.message || "unknown"
     });
     return null;
@@ -4228,7 +4373,6 @@ function createPlaylistRenderSignature() {
   return JSON.stringify({
     selectedPlaylistId: state.selectedPlaylistId,
     query: state.query,
-    activePlaylistMenuId: state.activePlaylistMenuId || "",
     playlists: getPlaylistItems().map((playlist) => ({
       id: playlist.id,
       detail: playlist.detail,
@@ -4261,7 +4405,6 @@ function createTrackListRenderSignature() {
     query: state.query,
     isLoading: state.isLoading,
     message: shouldRenderMessage ? state.message : "",
-    activeMenuTrackKey: state.activeMenuTrackKey || "",
     artistBrowseId: state.artistBrowse?.id || "",
     artistBrowseLoading: Boolean(state.artistBrowse?.isLoading),
     artistBrowseReleaseId: state.artistBrowse?.activeReleaseId || "",
@@ -4531,40 +4674,36 @@ function canUsePublicApolloLauncherUrl() {
   }
 }
 
-function appendApolloTrackParams(url, track, { includeArtwork = true, includeRemoteSources = true } = {}) {
-  url.searchParams.set("provider", track.provider || "remote");
-  url.searchParams.set("id", String(track.id || track.trackId || track.key));
-  url.searchParams.set("title", track.title || "Unknown Title");
-  url.searchParams.set("artist", track.artist || "Unknown Artist");
-
-  if (track.album) {
-    url.searchParams.set("album", track.album);
-  }
-
-  if (track.trackId) {
-    url.searchParams.set("trackId", String(track.trackId));
-  }
-
-  if (includeRemoteSources && track.externalUrl) {
-    url.searchParams.set("externalUrl", track.externalUrl);
-  }
-
-  if (includeRemoteSources && track.downloadTarget) {
-    url.searchParams.set("downloadTarget", track.downloadTarget);
-  }
-
-  if (includeArtwork && isRemoteDiscordArtworkUrl(track.artwork)) {
-    url.searchParams.set("artwork", track.artwork);
-  }
-}
-
-function appendApolloCompactLibraryParams(url, track) {
-  const trackId = getLibraryTrackId(track);
+function appendApolloTrackParams(url, track, { includeRemoteSources = true } = {}) {
+  const trackId = buildApolloSharedTrackId(track);
+  const source = includeRemoteSources ? buildTrackSourceLink(track) : "";
   if (!trackId) {
     return false;
   }
 
-  url.searchParams.set("trackId", trackId);
+  url.searchParams.set("id", trackId);
+
+  const inferredProvider = inferApolloSharedTrackProvider(trackId, source, "");
+  const provider = String(track?.provider || "").trim().toLowerCase();
+  if (provider && provider !== inferredProvider && provider !== "remote") {
+    url.searchParams.set("provider", provider);
+  }
+
+  const derivedSource = buildApolloSharedTrackSource(trackId, provider || inferredProvider, source);
+  if (source && (!derivedSource || derivedSource !== source)) {
+    url.searchParams.set("src", source);
+  }
+
+  return true;
+}
+
+function appendApolloCompactLibraryParams(url, track) {
+  const trackId = buildApolloSharedTrackId(track);
+  if (!trackId) {
+    return false;
+  }
+
+  url.searchParams.set("id", trackId);
   return true;
 }
 
@@ -4601,8 +4740,8 @@ function buildApolloTrackDeepLink(track) {
   const libraryTrackId = getLibraryTrackId(track);
   if (libraryTrackId) {
     appendApolloCompactLibraryParams(url, track);
-  } else {
-    appendApolloTrackParams(url, track);
+  } else if (!appendApolloTrackParams(url, track)) {
+    return "";
   }
   const deepLinkUrl = url.toString();
   return deepLinkUrl.length <= 2048 ? deepLinkUrl : "";
@@ -5306,7 +5445,181 @@ async function handleListenAlongSignalEvent({ sessionId, payload }) {
 }
 
 function buildTrackSourceLink(track) {
-  return String(track?.externalUrl || track?.downloadTarget || "").trim();
+  return String(track?.sourceUrl || track?.externalUrl || track?.downloadTarget || "").trim();
+}
+
+function buildApolloSharedTrackId(track) {
+  const providerIds = normaliseProviderIds(track?.providerIds);
+  for (const key of APOLLO_SHAREABLE_PROVIDER_ID_KEYS) {
+    const value = String(providerIds?.[key] || "").trim();
+    if (value) {
+      return `${key}:${value}`;
+    }
+  }
+
+  const rawId = String(track?.id || track?.trackId || track?.key || "").trim();
+  if (!rawId) {
+    return "";
+  }
+
+  if (rawId.includes(":")) {
+    return rawId;
+  }
+
+  const provider = String(track?.provider || "").trim().toLowerCase();
+  if (!provider || provider === "remote") {
+    const libraryTrackId = getLibraryTrackId(track);
+    return libraryTrackId ? `library:${libraryTrackId}` : rawId;
+  }
+
+  return `${provider}:${rawId}`;
+}
+
+function inferApolloSharedTrackProvider(trackId, sourceUrl = "", fallbackProvider = "remote") {
+  const idPrefix = String(trackId || "").trim().match(/^([a-z0-9-]+):/i)?.[1]?.toLowerCase() || "";
+  if (idPrefix === "library") {
+    return "library";
+  }
+
+  if (idPrefix && idPrefix !== "link" && [...PROVIDER_ID_KEYS, "deezer"].includes(idPrefix)) {
+    return idPrefix;
+  }
+
+  const trimmedSource = String(sourceUrl || "").trim();
+  if (!trimmedSource) {
+    return fallbackProvider;
+  }
+
+  if (/^ytsearch\d*:/i.test(trimmedSource)) {
+    return "youtube";
+  }
+
+  try {
+    const parsedSource = new URL(trimmedSource);
+    const hostname = parsedSource.hostname.toLowerCase();
+    if (hostname.includes("spotify")) {
+      return "spotify";
+    }
+    if (hostname.includes("youtube") || hostname === "youtu.be") {
+      return "youtube";
+    }
+    if (hostname.includes("soundcloud")) {
+      return "soundcloud";
+    }
+    if (hostname.includes("deezer")) {
+      return "deezer";
+    }
+    if (hostname.includes("itunes") || hostname.includes("apple.com")) {
+      return "itunes";
+    }
+  } catch {
+    // Ignore invalid source URLs and fall back to the provided/default provider.
+  }
+
+  return fallbackProvider;
+}
+
+function buildApolloSharedTrackSource(trackId, provider = "", fallbackSource = "") {
+  const trimmedTrackId = String(trackId || "").trim();
+  const effectiveProvider = String(provider || inferApolloSharedTrackProvider(trimmedTrackId, fallbackSource, "")).trim().toLowerCase();
+  const providerScopedId = trimmedTrackId.includes(":")
+    ? trimmedTrackId.slice(trimmedTrackId.indexOf(":") + 1)
+    : trimmedTrackId;
+  const rawId = providerScopedId.trim();
+  if (!rawId) {
+    return String(fallbackSource || "").trim();
+  }
+
+  if (effectiveProvider === "deezer") {
+    return `https://www.deezer.com/track/${rawId}`;
+  }
+
+  if (effectiveProvider === "spotify") {
+    return `https://open.spotify.com/track/${rawId}`;
+  }
+
+  if (effectiveProvider === "youtube") {
+    return `https://www.youtube.com/watch?v=${rawId}`;
+  }
+
+  if (effectiveProvider === "itunes" && /^\d+$/.test(rawId)) {
+    return `https://music.apple.com/us/song/${rawId}`;
+  }
+
+  return String(fallbackSource || "").trim();
+}
+
+function isApolloSharedTrackMetadataMissing(track) {
+  return !track || (
+    String(track.title || "").trim() === ""
+    || String(track.title || "").trim() === "Unknown Title"
+    || String(track.artist || "").trim() === ""
+    || String(track.artist || "").trim() === "Unknown Artist"
+  );
+}
+
+async function hydrateApolloSharedTrack(track) {
+  if (!track || track.provider === "library" || !isApolloSharedTrackMetadataMissing(track)) {
+    return track;
+  }
+
+  const sharedTrackId = buildApolloSharedTrackId(track) || String(track.id || "").trim();
+  const sourceUrl = buildTrackSourceLink(track) || buildApolloSharedTrackSource(sharedTrackId, track.provider, "");
+  if (!sourceUrl) {
+    return track;
+  }
+
+  try {
+    const resolvedTrack = await requestJson("/api/resolve-shared-track", {
+      method: "POST",
+      body: JSON.stringify({
+        id: sharedTrackId
+      })
+    });
+
+    return resolvedTrack?.provider === "library" || resolvedTrack?.trackId
+      ? normaliseLibraryTrack(resolvedTrack)
+      : normaliseRemoteTrack(resolvedTrack);
+  } catch {
+    // Fall back to source inspection for older servers that do not expose shared-track resolution yet.
+  }
+
+  try {
+    const metadata = await requestJson("/api/inspect-link", {
+      method: "POST",
+      body: JSON.stringify({
+        url: sourceUrl
+      })
+    });
+
+    return normaliseRemoteTrack({
+      id: sharedTrackId || track.id || metadata?.id || `${metadata?.provider || track.provider || "remote"}:${sourceUrl}`,
+      provider: metadata?.provider || track.provider || inferApolloSharedTrackProvider(track.id, sourceUrl),
+      title: metadata?.title || track.title,
+      artist: metadata?.artist || track.artist,
+      artists: metadata?.artists || track.artists,
+      album: metadata?.album || track.album,
+      albumArtist: metadata?.albumArtist || track.albumArtist,
+      trackNumber: metadata?.trackNumber || track.trackNumber,
+      discNumber: metadata?.discNumber || track.discNumber,
+      duration: metadata?.duration || track.duration,
+      releaseDate: metadata?.releaseDate || track.releaseDate,
+      releaseYear: metadata?.releaseYear || track.releaseYear,
+      genre: metadata?.genre || track.genre,
+      explicit: metadata?.explicit ?? track.explicit,
+      artwork: metadata?.artwork || track.artwork,
+      providerIds: metadata?.providerIds || track.providerIds,
+      isrc: metadata?.isrc || track.isrc,
+      sourcePlatform: metadata?.sourcePlatform || track.sourcePlatform,
+      sourceUrl: metadata?.sourceUrl || track.sourceUrl || sourceUrl,
+      externalUrl: metadata?.externalUrl || track.externalUrl || (sourceUrl.startsWith("http") ? sourceUrl : ""),
+      downloadTarget: track.downloadTarget || metadata?.downloadTarget || metadata?.externalUrl || sourceUrl,
+      metadataSource: metadata?.metadataSource || track.metadataSource || "apollo-link",
+      requestedProvider: track.requestedProvider || ""
+    });
+  } catch {
+    return track;
+  }
 }
 
 function buildShareableListenAlongLink(track = getPlaybackTrack()) {
@@ -5555,15 +5868,37 @@ function parseApolloLink(url) {
     const sessionToken = parsedUrl.searchParams.get("token") || "";
     const peerPort = parsedUrl.searchParams.get("port") || "";
     const peerHosts = parsedUrl.searchParams.getAll("host");
-    const trackIdParam = parsedUrl.searchParams.get("trackId") || parsedUrl.searchParams.get("id");
-    const provider = parsedUrl.searchParams.get("provider") || (trackIdParam ? "library" : "remote");
+    const sourceParam =
+      parsedUrl.searchParams.get("src")
+      || parsedUrl.searchParams.get("externalUrl")
+      || parsedUrl.searchParams.get("downloadTarget")
+      || "";
+    const sharedTrackId = parsedUrl.searchParams.get("id") || "";
+    const trackIdParam = parsedUrl.searchParams.get("trackId") || "";
+    const remoteTrackId = sharedTrackId || "";
+    const hasRemotePayload = Boolean(
+      sourceParam
+      || parsedUrl.searchParams.get("provider")
+      || parsedUrl.searchParams.get("externalUrl")
+      || parsedUrl.searchParams.get("downloadTarget")
+      || parsedUrl.searchParams.get("title")
+      || parsedUrl.searchParams.get("artist")
+      || parsedUrl.searchParams.get("album")
+      || parsedUrl.searchParams.get("artwork")
+    );
+    const inferredProvider = inferApolloSharedTrackProvider(remoteTrackId, sourceParam);
+    const provider = parsedUrl.searchParams.get("provider")
+      || (trackIdParam && !hasRemotePayload
+        ? "library"
+        : inferredProvider);
+    const resolvedSource = sourceParam || buildApolloSharedTrackSource(remoteTrackId, provider, "");
     const title = parsedUrl.searchParams.get("title") || "Unknown Title";
     const artist = parsedUrl.searchParams.get("artist") || "Unknown Artist";
     const album = parsedUrl.searchParams.get("album") || "";
     const artwork = parsedUrl.searchParams.get("artwork") || "";
     const peerCandidates = buildListenAlongPeerCandidates(peerHosts, peerPort);
 
-    if (route === APOLLO_DEEP_LINK_ROUTE_LISTEN && sessionId && !trackIdParam) {
+    if (route === APOLLO_DEEP_LINK_ROUTE_LISTEN && sessionId && !sharedTrackId && !trackIdParam) {
       return {
         route,
         sessionId,
@@ -5575,7 +5910,11 @@ function parseApolloLink(url) {
     }
 
     if (provider === "library") {
-      const trackId = trackIdParam;
+      const trackId = trackIdParam || (
+        remoteTrackId.startsWith("library:")
+          ? remoteTrackId.slice("library:".length)
+          : ""
+      );
       if (!trackId) {
         return null;
       }
@@ -5610,14 +5949,15 @@ function parseApolloLink(url) {
       sessionToken,
       peerCandidates,
       track: normaliseRemoteTrack({
-        id: parsedUrl.searchParams.get("id") || `${provider}:${title}:${artist}`,
+        id: remoteTrackId || `${provider}:${title}:${artist}`,
         provider,
         title,
         artist,
         album,
         artwork,
-        externalUrl: parsedUrl.searchParams.get("externalUrl") || "",
-        downloadTarget: parsedUrl.searchParams.get("downloadTarget") || parsedUrl.searchParams.get("externalUrl") || ""
+        externalUrl: parsedUrl.searchParams.get("externalUrl") || (resolvedSource.startsWith("http") ? resolvedSource : ""),
+        downloadTarget: parsedUrl.searchParams.get("downloadTarget") || resolvedSource || parsedUrl.searchParams.get("externalUrl") || "",
+        metadataSource: "apollo-link"
       }),
       playback: null
     };
@@ -5847,6 +6187,10 @@ async function handleApolloDeepLink(url) {
   const action = parseApolloLink(url);
   if (!action) {
     return;
+  }
+
+  if (action.track?.provider !== "library") {
+    action.track = await hydrateApolloSharedTrack(action.track);
   }
 
   if (action.route === APOLLO_DEEP_LINK_ROUTE_LISTEN) {
@@ -6450,6 +6794,72 @@ async function refreshLibrary({ force = false, reason = "manual" } = {}) {
   return libraryRefreshInFlight;
 }
 
+function clearDownloadWatcher(downloadId) {
+  const existingWatcher = activeDownloadWatchers.get(downloadId);
+  if (existingWatcher) {
+    clearTimeout(existingWatcher.timeoutId);
+    activeDownloadWatchers.delete(downloadId);
+  }
+}
+
+function watchDownloadCompletion(downloadId, track, { silent = false } = {}) {
+  const normalizedDownloadId = String(downloadId || "").trim();
+  if (!normalizedDownloadId || activeDownloadWatchers.has(normalizedDownloadId)) {
+    return;
+  }
+
+  let stopped = false;
+  const trackLabel = String(track?.title || "track").trim() || "track";
+  const pollDownloadStatus = async () => {
+    if (stopped) {
+      return;
+    }
+
+    try {
+      const payload = await requestJson(`/api/downloads/${encodeURIComponent(normalizedDownloadId)}`);
+      const status = String(payload?.status || "").trim().toLowerCase();
+      if (status === "completed") {
+        stopped = true;
+        clearDownloadWatcher(normalizedDownloadId);
+        if (state.settings.downloads.autoRefreshLibrary) {
+          await refreshLibrary({
+            force: true,
+            reason: "download-complete"
+          });
+        }
+        if (!silent) {
+          state.message = `${trackLabel} was downloaded to Apollo.`;
+          renderStatus();
+        }
+        return;
+      }
+
+      if (status === "failed") {
+        stopped = true;
+        clearDownloadWatcher(normalizedDownloadId);
+        if (!silent) {
+          state.message = payload?.message || `Apollo could not download ${trackLabel}.`;
+          renderStatus();
+        }
+        return;
+      }
+    } catch (error) {
+      if (stopped) {
+        return;
+      }
+    }
+
+    const timeoutId = window.setTimeout(pollDownloadStatus, DOWNLOAD_STATUS_POLL_MS);
+    activeDownloadWatchers.set(normalizedDownloadId, {
+      timeoutId
+    });
+  };
+
+  activeDownloadWatchers.set(normalizedDownloadId, {
+    timeoutId: window.setTimeout(pollDownloadStatus, DOWNLOAD_STATUS_POLL_MS)
+  });
+}
+
 async function runSearch({ historySource = "", historyReplace = false } = {}) {
   const query = String(state.query || "").trim();
   const requestId = ++activeSearchRequestId;
@@ -6979,11 +7389,26 @@ function buildDownloadPayload(track) {
     provider: track.provider,
     title: track.title,
     artist: track.artist,
+    artists: normaliseTrackArtists(track.artists, track.artist),
     album: track.album,
+    albumArtist: String(track.albumArtist || "").trim(),
+    trackNumber: normaliseTrackNumberTag(track.trackNumber),
+    discNumber: normaliseTrackNumberTag(track.discNumber),
+    releaseDate: normaliseTrackReleaseDate(track.releaseDate || track.releaseYear || ""),
+    releaseYear: normaliseTrackNumberTag(track.releaseYear),
+    genre: Array.isArray(track.genre)
+      ? track.genre.map((value) => String(value || "").trim()).filter(Boolean).join(", ")
+      : String(track.genre || "").trim(),
+    explicit: normaliseTrackExplicitFlag(track.explicit),
+    artwork: track.artwork || "",
+    providerIds: normaliseProviderIds(track.providerIds),
+    isrc: String(track.isrc || track.providerIds?.isrc || "").trim(),
+    sourcePlatform: String(track.sourcePlatform || track.provider || "").trim(),
     externalUrl: track.externalUrl,
-    sourceUrl: track.externalUrl || track.downloadTarget,
+    sourceUrl: track.sourceUrl || track.externalUrl || track.downloadTarget,
     downloadTarget: track.downloadTarget,
-    duration: track.duration
+    duration: track.duration,
+    metadataSource: track.metadataSource || track.provider || "remote"
   };
 }
 
@@ -7027,19 +7452,16 @@ async function downloadTrackToServer(track, { silent = false } = {}) {
   }
 
   try {
-    await requestJson("/api/downloads/server", {
+    const payload = await requestJson("/api/downloads/server", {
       method: "POST",
       body: JSON.stringify(buildDownloadPayload(track))
     });
 
+    watchDownloadCompletion(payload?.id, track, { silent });
+
     if (!silent) {
       state.message = `Queued ${track.title} for Apollo library download with metadata.`;
       renderStatus();
-    }
-    if (state.settings.downloads.autoRefreshLibrary) {
-      setTimeout(() => {
-        void refreshLibrary();
-      }, 4000);
     }
   } catch (error) {
     if (!silent) {
@@ -7246,6 +7668,8 @@ function getBusyStatusLabel() {
 
 function renderPlaylists() {
   const items = getPlaylistItems();
+  state.activePlaylistMenuId = null;
+  state.activePlaylistMenuAnchor = null;
   document.querySelectorAll(".playlist-menu-popover--portal").forEach((menu) => menu.remove());
   playlistList.innerHTML = "";
 
@@ -7294,36 +7718,20 @@ function renderPlaylists() {
       menuButton.addEventListener("click", (event) => {
         event.stopPropagation();
         const rect = menuButton.getBoundingClientRect();
-        const shouldOpen = state.activePlaylistMenuId !== playlist.id;
-        closeActiveMenu();
-        state.activePlaylistMenuId = shouldOpen ? playlist.id : null;
-        state.activePlaylistMenuAnchor = shouldOpen
-          ? {
-              x: rect.right,
-              y: rect.bottom
-            }
-          : null;
-        renderPlaylists();
+        openPlaylistMenu(row, playlist.id, playlistRecord, {
+          x: rect.right,
+          y: rect.bottom
+        });
       });
 
       row.addEventListener("contextmenu", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        closeActiveMenu();
-        state.activePlaylistMenuId = playlist.id;
-        state.activePlaylistMenuAnchor = {
+        openPlaylistMenu(row, playlist.id, playlistRecord, {
           x: event.clientX,
           y: event.clientY
-        };
-        renderPlaylists();
+        });
       });
-
-      if (state.activePlaylistMenuId === playlist.id) {
-        const menu = createPlaylistMenu(playlistRecord);
-        menu.classList.add("playlist-menu-popover--portal");
-        document.body.append(menu);
-        positionActiveMenu(row, menu, state.activePlaylistMenuAnchor);
-      }
     }
 
     playlistList.append(row);
@@ -7612,9 +8020,59 @@ function positionActiveMenu(row, menu, anchorOverride = null) {
   menu.style.top = `${Math.min(Math.max(viewportPadding, top), maxTop)}px`;
 }
 
+function openTrackMenu(row, track, anchor) {
+  const shouldToggleClosed = state.activeMenuTrackKey === track.key
+    && document.querySelector(".track-menu-popover--portal");
+  closeActiveMenu();
+  if (shouldToggleClosed) {
+    return;
+  }
+
+  state.activeMenuTrackKey = track.key;
+  state.activeMenuAnchor = anchor;
+  const menu = createRowMenu(track);
+  menu.classList.add("track-menu-popover--portal");
+  document.body.append(menu);
+  positionActiveMenu(row, menu, anchor);
+}
+
+function openPlaylistMenu(row, playlistId, playlistRecord, anchor) {
+  const shouldToggleClosed = state.activePlaylistMenuId === playlistId
+    && document.querySelector(".playlist-menu-popover--portal");
+  closeActiveMenu();
+  if (shouldToggleClosed) {
+    return;
+  }
+
+  state.activePlaylistMenuId = playlistId;
+  state.activePlaylistMenuAnchor = anchor;
+  const menu = createPlaylistMenu(playlistRecord);
+  menu.classList.add("playlist-menu-popover--portal");
+  document.body.append(menu);
+  positionActiveMenu(row, menu, anchor);
+}
+
+function openQueueMenu(row, queueEntry, isCurrent, anchor) {
+  const shouldToggleClosed = state.activeQueueMenuId === queueEntry.id
+    && document.querySelector(".queue-menu-popover--portal");
+  closeActiveMenu();
+  if (shouldToggleClosed) {
+    return;
+  }
+
+  state.activeQueueMenuId = queueEntry.id;
+  state.activeQueueMenuAnchor = anchor;
+  const menu = createQueueMenu(queueEntry, isCurrent);
+  menu.classList.add("queue-menu-popover--portal");
+  document.body.append(menu);
+  positionActiveMenu(row, menu, anchor);
+}
+
 function renderTracks() {
   const visibleTracks = getVisibleTracks();
   const showArtistSearchResults = Boolean(state.query && !state.artistBrowse && state.artistSearchResults.length);
+  state.activeMenuTrackKey = null;
+  state.activeMenuAnchor = null;
   document.querySelectorAll(".track-menu-popover--portal").forEach((menu) => menu.remove());
   trackList.innerHTML = "";
   trackList.setAttribute("aria-busy", state.isLoading ? "true" : "false");
@@ -7697,36 +8155,20 @@ function renderTracks() {
     menuButton.addEventListener("click", (event) => {
       event.stopPropagation();
       const rect = menuButton.getBoundingClientRect();
-      const shouldOpen = state.activeMenuTrackKey !== track.key;
-      closeActiveMenu();
-      state.activeMenuTrackKey = shouldOpen ? track.key : null;
-      state.activeMenuAnchor = shouldOpen
-        ? {
-            x: rect.right,
-            y: rect.bottom
-          }
-        : null;
-      renderTracks();
+      openTrackMenu(row, track, {
+        x: rect.right,
+        y: rect.bottom
+      });
     });
 
     row.addEventListener("contextmenu", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      closeActiveMenu();
-      state.activeMenuTrackKey = track.key;
-      state.activeMenuAnchor = {
+      openTrackMenu(row, track, {
         x: event.clientX,
         y: event.clientY
-      };
-      renderTracks();
+      });
     });
-
-    if (state.activeMenuTrackKey === track.key) {
-      const menu = createRowMenu(track);
-      menu.classList.add("track-menu-popover--portal");
-      document.body.append(menu);
-      positionActiveMenu(row, menu);
-    }
 
     fragment.append(row);
     queueDurationProbe(track);
@@ -8688,7 +9130,6 @@ document.addEventListener("click", (event) => {
     !event.target.closest(".library-item-menu")
   ) {
     closeActiveMenu();
-    render();
   }
 });
 
@@ -8702,7 +9143,6 @@ trackList.addEventListener("scroll", () => {
   }
 
   closeActiveMenu();
-  render();
 });
 
 playlistList.addEventListener("scroll", () => {
@@ -8715,7 +9155,6 @@ playlistList.addEventListener("scroll", () => {
   }
 
   closeActiveMenu();
-  render();
 });
 
 window.addEventListener("resize", () => {
@@ -8728,7 +9167,6 @@ window.addEventListener("resize", () => {
   }
 
   closeActiveMenu();
-  render();
 });
 
 window.addEventListener("mousedown", handleNavigationMouseButton, true);
@@ -9561,6 +9999,9 @@ const {
 } = await initialiseListenAlongSignaling();
 
 window.addEventListener("beforeunload", () => {
+  for (const downloadId of activeDownloadWatchers.keys()) {
+    clearDownloadWatcher(downloadId);
+  }
   stopJoinedListenAlongSession();
   void clearPublishedListenAlongSession();
   runtimeAssetWatcherCleanup?.();
