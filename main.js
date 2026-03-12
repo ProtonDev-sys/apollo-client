@@ -7,6 +7,7 @@ const { createListenAlongServer } = require("./src/listen-along-p2p");
 
 const APOLLO_PROTOCOL = "apollo";
 const DEFAULT_DISCORD_CLIENT_ID = "1480728455263031296";
+const WINDOWS_APP_USER_MODEL_ID = "com.apollo.client";
 const GITHUB_REPO_OWNER = process.env.APOLLO_CLIENT_GITHUB_OWNER || "ProtonDev-sys";
 const GITHUB_REPO_NAME = process.env.APOLLO_CLIENT_GITHUB_REPO || "apollo-client";
 const GITHUB_REPO_BRANCH = process.env.APOLLO_CLIENT_GITHUB_BRANCH || "main";
@@ -644,6 +645,9 @@ if (hasSingleInstanceLock) {
     discordLogFilePath = path.join(app.getPath("userData"), "apollo-discord.log");
     logApp("main", `app ready version=${app.getVersion()} packaged=${app.isPackaged}`);
     logDiscord("app ready");
+    if (process.platform === "win32") {
+      app.setAppUserModelId(WINDOWS_APP_USER_MODEL_ID);
+    }
     registerApolloProtocol();
     latestDiscordConfig = getDiscordPresenceDefaults();
     listenAlongServer = createListenAlongServer({
