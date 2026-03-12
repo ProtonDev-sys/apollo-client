@@ -1,6 +1,6 @@
 {
   "name": "apollo-client",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Desktop client shell for the Apollo music server.",
   "main": "main.js",
   "scripts": {
