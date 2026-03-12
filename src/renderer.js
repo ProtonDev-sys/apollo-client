@@ -3801,7 +3801,7 @@ function createPluginRuntime() {
       trackList,
       searchInput,
       nowPlaying,
-      serverStatus,
+      serverStatus: null,
       audioPlayer
     },
     helpers: {
