@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain } = require("electron");
+const { app, BrowserWindow, ipcMain, shell } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
 const { createDiscordPresenceController } = require("./discord-presence");
@@ -7,6 +7,12 @@ const { createListenAlongServer } = require("./src/listen-along-p2p");
 
 const APOLLO_PROTOCOL = "apollo";
 const DEFAULT_DISCORD_CLIENT_ID = "1480728455263031296";
+const GITHUB_REPO_OWNER = process.env.APOLLO_CLIENT_GITHUB_OWNER || "ProtonDev-sys";
+const GITHUB_REPO_NAME = process.env.APOLLO_CLIENT_GITHUB_REPO || "apollo-client";
+const GITHUB_REPO_BRANCH = process.env.APOLLO_CLIENT_GITHUB_BRANCH || "main";
+const GITHUB_PACKAGE_URL = `https://raw.githubusercontent.com/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/${GITHUB_REPO_BRANCH}/package.json`;
+const GITHUB_REPO_URL = `https://github.com/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}`;
+const CLIENT_UPDATE_TIMEOUT_MS = 5000;
 
 const discordPresence = createDiscordPresenceController({
   appName: "Apollo Client",
@@ -29,6 +35,8 @@ let isCleaningUpForQuit = false;
 let appLogFilePath = null;
 let discordLogFilePath = null;
 let listenAlongServer = null;
+let pendingClientUpdateNotice = null;
+let hasShownClientUpdateNotice = false;
 const MAX_LOG_FILE_BYTES = 4 * 1024 * 1024;
 
 function appendLogLine(targetPath, source, message) {
@@ -80,6 +88,107 @@ function buildRuntimeInfo() {
     logPath: appLogFilePath || path.join(app.getPath("userData"), "apollo-client.log"),
     isPackaged: app.isPackaged
   };
+}
+
+function compareClientVersions(left, right) {
+  const parseVersion = (value) => {
+    const raw = String(value || "").trim();
+    const [core = "", prerelease = ""] = raw.split("-", 2);
+    return {
+      raw,
+      prerelease,
+      parts: core.split(".").map((segment) => Number.parseInt(segment, 10))
+    };
+  };
+
+  const leftVersion = parseVersion(left);
+  const rightVersion = parseVersion(right);
+  const maxParts = Math.max(leftVersion.parts.length, rightVersion.parts.length);
+
+  for (let index = 0; index < maxParts; index += 1) {
+    const leftPart = Number.isFinite(leftVersion.parts[index]) ? leftVersion.parts[index] : 0;
+    const rightPart = Number.isFinite(rightVersion.parts[index]) ? rightVersion.parts[index] : 0;
+    if (leftPart !== rightPart) {
+      return leftPart - rightPart;
+    }
+  }
+
+  if (leftVersion.prerelease && !rightVersion.prerelease) {
+    return -1;
+  }
+
+  if (!leftVersion.prerelease && rightVersion.prerelease) {
+    return 1;
+  }
+
+  return leftVersion.prerelease.localeCompare(rightVersion.prerelease);
+}
+
+async function fetchLatestGithubClientVersion() {
+  const abortController = new AbortController();
+  const timeoutHandle = setTimeout(() => {
+    abortController.abort();
+  }, CLIENT_UPDATE_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(GITHUB_PACKAGE_URL, {
+      signal: abortController.signal,
+      headers: {
+        "Cache-Control": "no-cache"
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error(`GitHub responded with ${response.status}`);
+    }
+
+    const payload = await response.json();
+    const version = String(payload?.version || "").trim();
+    if (!version) {
+      throw new Error("GitHub package.json did not include a version");
+    }
+
+    return version;
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
+async function maybeShowClientUpdateNotice() {
+  if (
+    hasShownClientUpdateNotice
+    || !pendingClientUpdateNotice
+    || !mainWindow
+    || mainWindow.isDestroyed()
+    || mainWindow.webContents.isLoadingMainFrame()
+  ) {
+    return;
+  }
+
+  sendToWindow(mainWindow, "app:client-update-required", {
+    ...pendingClientUpdateNotice,
+    branch: GITHUB_REPO_BRANCH
+  });
+  logApp("update", "client update notice sent to renderer");
+}
+
+async function checkForClientUpdate() {
+  try {
+    const currentVersion = String(app.getVersion() || "").trim();
+    const latestVersion = await fetchLatestGithubClientVersion();
+    if (!currentVersion || compareClientVersions(currentVersion, latestVersion) >= 0) {
+      return;
+    }
+
+    pendingClientUpdateNotice = {
+      currentVersion,
+      latestVersion
+    };
+    logApp("update", `client update required current=${currentVersion} latest=${latestVersion}`);
+    await maybeShowClientUpdateNotice();
+  } catch (error) {
+    logApp("update", `client update check failed error=${error?.message || "unknown"}`);
+  }
 }
 
 function buildWindowState(window) {
@@ -216,6 +325,39 @@ ipcMain.handle("listen-along:clear-session", async (_event, sessionId) => {
 
 ipcMain.on("app:get-runtime-info-sync", (event) => {
   event.returnValue = buildRuntimeInfo();
+});
+
+ipcMain.handle("app:get-pending-client-update", () => {
+  if (!pendingClientUpdateNotice) {
+    return null;
+  }
+
+  return {
+    ...pendingClientUpdateNotice,
+    branch: GITHUB_REPO_BRANCH
+  };
+});
+
+ipcMain.handle("app:ack-client-update-required", () => {
+  if (!pendingClientUpdateNotice) {
+    return false;
+  }
+
+  hasShownClientUpdateNotice = true;
+  pendingClientUpdateNotice = null;
+  logApp("update", "client update notice acknowledged by renderer");
+  return true;
+});
+
+ipcMain.handle("app:open-external-url", async (_event, url) => {
+  const targetUrl = String(url || "").trim();
+  if (!targetUrl) {
+    return false;
+  }
+
+  await shell.openExternal(targetUrl);
+  logApp("main", `opened external url=${targetUrl}`);
+  return true;
 });
 
 ipcMain.on("app:log", (_event, payload) => {
@@ -467,6 +609,7 @@ function createWindow() {
     sendWindowState(mainWindow);
     sendDiscordSocialState();
     sendListenAlongState();
+    void maybeShowClientUpdateNotice();
     void logRendererDesktopBridgeState();
     setTimeout(() => {
       void logRendererDesktopBridgeState();
@@ -543,6 +686,7 @@ if (hasSingleInstanceLock) {
     });
     discordSocial.start();
     createWindow();
+    void checkForClientUpdate();
     sendDiscordSocialState();
     void syncDiscordPresence();
     dispatchDeepLink(findDeepLinkArg(process.argv));

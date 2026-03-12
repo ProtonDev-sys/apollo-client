@@ -6,6 +6,7 @@ release-unpacked-runtime/
 SDK/
 native-bin/
 server-inspect/
+backend-audit/
 vendor/discord_social_sdk/
 *.obj
 *.pdb

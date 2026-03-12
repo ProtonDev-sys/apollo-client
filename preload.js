@@ -12,6 +12,7 @@ const { createRuntimeAssetsService } = require("./src/preload/runtime-assets");
 
 const DEFAULT_DISCORD_CLIENT_ID = "1480728455263031296";
 const deepLinkEvents = createEventChannel();
+const clientUpdateRequiredEvents = createEventChannel();
 const windowStateStore = createStateStore({
   isFocused: true,
   isMaximized: false
@@ -32,6 +33,7 @@ const listenAlongStateStore = createStateStore({
   message: "Listen along server unavailable."
 });
 let pendingDeepLinkUrl = "";
+let pendingClientUpdateInfo = null;
 
 const runtimeInfo = (() => {
   try {
@@ -72,6 +74,12 @@ if (typeof window !== "undefined") {
 ipcRenderer.on("apollo:deep-link", (_event, url) => {
   pendingDeepLinkUrl = url;
   deepLinkEvents.emit(url);
+});
+
+ipcRenderer.on("app:client-update-required", (_event, payload) => {
+  pendingClientUpdateInfo = payload && typeof payload === "object" ? payload : null;
+  logRendererEvent("update", "preload received client update notice", pendingClientUpdateInfo);
+  clientUpdateRequiredEvents.emit(pendingClientUpdateInfo);
 });
 
 ipcRenderer.on("window-controls:state-changed", (_event, state) => {
@@ -129,6 +137,16 @@ contextBridge.exposeInMainWorld("apolloDesktop", {
     }
     return unsubscribe;
   },
+  onClientUpdateRequired: (callback) => {
+    const unsubscribe = clientUpdateRequiredEvents.subscribe(callback);
+    if (typeof callback === "function" && pendingClientUpdateInfo) {
+      callback(pendingClientUpdateInfo);
+    }
+    return unsubscribe;
+  },
+  getPendingClientUpdate: () => ipcRenderer.invoke("app:get-pending-client-update"),
+  acknowledgeClientUpdateRequired: () => ipcRenderer.invoke("app:ack-client-update-required"),
+  openExternalUrl: (url) => ipcRenderer.invoke("app:open-external-url", url),
   windowControls: {
     available: true,
     getState: () => ipcRenderer.invoke("window-controls:get-state"),
