@@ -40,7 +40,17 @@ export function normaliseConnectionSettings(connection = {}) {
   let port = String(connection?.port || "").trim();
 
   if (hostname.includes("://")) {
-    const parsedUrl = new URL(hostname);
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(hostname);
+    } catch {
+      throw new Error("Enter a valid Apollo server URL.");
+    }
+
+    if ((parsedUrl.pathname && parsedUrl.pathname !== "/") || parsedUrl.search || parsedUrl.hash) {
+      throw new Error("Enter only the Apollo server host or root URL, not an API path.");
+    }
+
     protocol = parsedUrl.protocol === "https:" ? "https" : "http";
     hostname = parsedUrl.hostname;
     if (!port) {

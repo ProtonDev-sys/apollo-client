@@ -1015,6 +1015,12 @@ function escapeHtml(value) {
   return escapeHtmlValue(value);
 }
 
+function createTrustedMarkupNode(markup) {
+  const template = document.createElement("template");
+  template.innerHTML = String(markup || "").trim();
+  return template.content.firstElementChild || template.content.firstChild || document.createTextNode("");
+}
+
 function outlinedSvg(content, viewBox = "0 0 24 24") {
   return buildOutlinedSvg(content, viewBox);
 }
@@ -7622,29 +7628,46 @@ function renderDiscordInviteModal() {
   discordInviteSubmit.textContent = state.discordInvite.isSending ? "Sending..." : "Send invite";
 
   if (state.discordInvite.isLoading) {
-    discordInviteFriends.innerHTML = '<p class="discord-friend-empty">Loading Discord friends...</p>';
+    const message = document.createElement("p");
+    message.className = "discord-friend-empty";
+    message.textContent = "Loading Discord friends...";
+    discordInviteFriends.replaceChildren(message);
     return;
   }
 
   if (!state.discordInvite.friends.length) {
-    discordInviteFriends.innerHTML = '<p class="discord-friend-empty">No Discord friends are available for invites right now.</p>';
+    const message = document.createElement("p");
+    message.className = "discord-friend-empty";
+    message.textContent = "No Discord friends are available for invites right now.";
+    discordInviteFriends.replaceChildren(message);
     return;
   }
 
-  discordInviteFriends.innerHTML = state.discordInvite.friends.map((friend) => `
-    <label class="discord-friend-row${friend.id === state.discordInvite.selectedFriendId ? " is-selected" : ""}">
-      <input
-        type="radio"
-        name="discord-invite-friend"
-        value="${escapeHtml(friend.id)}"
-        ${friend.id === state.discordInvite.selectedFriendId ? "checked" : ""}
-      >
-      <span class="discord-friend-copy">
-        <strong>${escapeHtml(friend.displayName || friend.username)}</strong>
-        <small>${escapeHtml(friend.status || "unknown")}${friend.playingApollo ? " | already on Apollo" : ""}</small>
-      </span>
-    </label>
-  `).join("");
+  const fragment = document.createDocumentFragment();
+  state.discordInvite.friends.forEach((friend) => {
+    const row = document.createElement("label");
+    row.className = `discord-friend-row${friend.id === state.discordInvite.selectedFriendId ? " is-selected" : ""}`;
+
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "discord-invite-friend";
+    input.value = String(friend.id || "");
+    input.checked = friend.id === state.discordInvite.selectedFriendId;
+
+    const copy = document.createElement("span");
+    copy.className = "discord-friend-copy";
+
+    const strong = document.createElement("strong");
+    strong.textContent = friend.displayName || friend.username || "Unknown friend";
+
+    const small = document.createElement("small");
+    small.textContent = `${friend.status || "unknown"}${friend.playingApollo ? " | already on Apollo" : ""}`;
+
+    copy.append(strong, small);
+    row.append(input, copy);
+    fragment.append(row);
+  });
+  discordInviteFriends.replaceChildren(fragment);
 
   discordInviteFriends.querySelectorAll('input[name="discord-invite-friend"]').forEach((input) => {
     input.addEventListener("change", () => {
@@ -8139,6 +8162,18 @@ function renderArtwork(track, className) {
   }
 
   return `<img class="${className}" src="${escapeHtml(withAccessToken(track.artwork))}" alt="">`;
+}
+
+function createArtworkNode(track, className, alt = "") {
+  if (track?.artwork) {
+    const image = document.createElement("img");
+    image.className = className;
+    image.src = withAccessToken(track.artwork);
+    image.alt = alt;
+    return image;
+  }
+
+  return createTrustedMarkupNode(noteIcon());
 }
 
 function toggleLike(track) {
@@ -8777,28 +8812,55 @@ function renderPlaylists() {
 
   items.forEach((playlist) => {
     const playlistRecord = state.playlists.find((entry) => entry.id === playlist.id);
-    const artworkMarkup = playlistRecord?.artworkUrl
-      ? `<img class="item-art-image" src="${escapeHtml(withAccessToken(playlistRecord.artworkUrl))}" alt="">`
-      : noteIcon();
     const isEditable = Boolean(playlistRecord);
     const row = document.createElement("div");
     row.className = `library-item${playlist.id === state.selectedPlaylistId && !state.query ? " is-active" : ""}`;
-    row.innerHTML = `
-      <button class="library-item-main" type="button">
-        <span class="item-art">${artworkMarkup}</span>
-        <span class="item-copy">
-          <p class="item-title">${escapeHtml(playlist.name)}</p>
-          <p class="item-subtitle">${escapeHtml(playlist.detail)}</p>
-        </span>
-      </button>
-      ${
-        isEditable
-          ? `<button class="library-item-menu" type="button" aria-label="Playlist actions">${dotsIcon()}</button>`
-          : '<span class="library-item-menu-spacer" aria-hidden="true"></span>'
-      }
-    `;
+    const mainButton = document.createElement("button");
+    mainButton.className = "library-item-main";
+    mainButton.type = "button";
 
-    row.querySelector(".library-item-main").addEventListener("click", () => {
+    const artwork = document.createElement("span");
+    artwork.className = "item-art";
+    if (playlistRecord?.artworkUrl) {
+      const image = document.createElement("img");
+      image.className = "item-art-image";
+      image.src = withAccessToken(playlistRecord.artworkUrl);
+      image.alt = "";
+      artwork.append(image);
+    } else {
+      artwork.append(createTrustedMarkupNode(noteIcon()));
+    }
+
+    const copy = document.createElement("span");
+    copy.className = "item-copy";
+
+    const title = document.createElement("p");
+    title.className = "item-title";
+    title.textContent = playlist.name;
+
+    const subtitle = document.createElement("p");
+    subtitle.className = "item-subtitle";
+    subtitle.textContent = playlist.detail;
+
+    copy.append(title, subtitle);
+    mainButton.append(artwork, copy);
+    row.append(mainButton);
+
+    if (isEditable) {
+      const menuButton = document.createElement("button");
+      menuButton.className = "library-item-menu";
+      menuButton.type = "button";
+      menuButton.setAttribute("aria-label", "Playlist actions");
+      menuButton.append(createTrustedMarkupNode(dotsIcon()));
+      row.append(menuButton);
+    } else {
+      const spacer = document.createElement("span");
+      spacer.className = "library-item-menu-spacer";
+      spacer.setAttribute("aria-hidden", "true");
+      row.append(spacer);
+    }
+
+    mainButton.addEventListener("click", () => {
       openPlaylistView(playlist.id, {
         historySource: "playlist"
       });
@@ -9208,28 +9270,63 @@ function renderTracks() {
     const row = document.createElement("div");
     row.dataset.trackKey = track.key;
     const duration = formatDuration(getCachedDuration(track), "--:--");
-    const provider = state.query ? ` · <span class="track-provider">${providerLabel(track.provider, track.requestedProvider)}</span>` : "";
 
     row.className = `track-row${track.key === state.selectedTrackKey ? " is-active" : ""}`;
-    row.innerHTML = `
-      <button class="track-main-button" type="button">
-        <span class="track-index">${index + 1}</span>
-        <span class="track-leading">
-          <span class="track-art">
-            ${renderArtwork(track, "track-art-image")}
-            <span class="track-art-play" aria-hidden="true">${playGlyphIcon()}</span>
-          </span>
-          <span class="track-copy">
-            <p class="track-title">${escapeHtml(track.title)}</p>
-            <p class="track-subtitle">${escapeHtml(track.artist)}${provider}</p>
-          </span>
-        </span>
-        <span class="track-duration">${duration}</span>
-      </button>
-      <button class="track-menu-button" type="button" aria-label="Track actions">${dotsIcon()}</button>
-    `;
+    const mainButton = document.createElement("button");
+    mainButton.className = "track-main-button";
+    mainButton.type = "button";
 
-    const mainButton = row.querySelector(".track-main-button");
+    const trackIndex = document.createElement("span");
+    trackIndex.className = "track-index";
+    trackIndex.textContent = String(index + 1);
+
+    const leading = document.createElement("span");
+    leading.className = "track-leading";
+
+    const art = document.createElement("span");
+    art.className = "track-art";
+    art.append(createArtworkNode(track, "track-art-image"));
+
+    const artPlay = document.createElement("span");
+    artPlay.className = "track-art-play";
+    artPlay.setAttribute("aria-hidden", "true");
+    artPlay.append(createTrustedMarkupNode(playGlyphIcon()));
+    art.append(artPlay);
+
+    const copy = document.createElement("span");
+    copy.className = "track-copy";
+
+    const title = document.createElement("p");
+    title.className = "track-title";
+    title.textContent = track.title || "Unknown Title";
+
+    const subtitle = document.createElement("p");
+    subtitle.className = "track-subtitle";
+    subtitle.append(document.createTextNode(track.artist || "Unknown Artist"));
+    if (state.query) {
+      subtitle.append(document.createTextNode(" · "));
+      const providerBadge = document.createElement("span");
+      providerBadge.className = "track-provider";
+      providerBadge.textContent = providerLabel(track.provider, track.requestedProvider);
+      subtitle.append(providerBadge);
+    }
+
+    copy.append(title, subtitle);
+    leading.append(art, copy);
+
+    const trackDuration = document.createElement("span");
+    trackDuration.className = "track-duration";
+    trackDuration.textContent = duration;
+
+    mainButton.append(trackIndex, leading, trackDuration);
+
+    const menuButton = document.createElement("button");
+    menuButton.className = "track-menu-button";
+    menuButton.type = "button";
+    menuButton.setAttribute("aria-label", "Track actions");
+    menuButton.append(createTrustedMarkupNode(dotsIcon()));
+
+    row.append(mainButton, menuButton);
     mainButton.addEventListener("focus", () => {
       prefetchPlaybackUrl(track);
     });
@@ -9240,8 +9337,6 @@ function renderTracks() {
         || Boolean(getPlaybackTrack() && getPlaybackTrack()?.key !== track.key);
       selectTrack(track.key, { autoplay });
     });
-
-    const menuButton = row.querySelector(".track-menu-button");
 
     menuButton.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -9396,41 +9491,37 @@ function renderDetailPanel() {
     state.activeDetailTab = "track";
   }
 
-  detailPanel.innerHTML = `
-    <div class="detail-panel-shell">
-      <div class="detail-tabs" role="tablist" aria-label="Detail panels">
-        ${tabs
-          .map(
-            (tab) => `
-              <button
-                class="detail-tab${tab.id === state.activeDetailTab ? " is-active" : ""}"
-                type="button"
-                role="tab"
-                aria-selected="${tab.id === state.activeDetailTab}"
-                data-detail-tab="${escapeHtml(tab.id)}"
-              >
-                ${escapeHtml(tab.label)}
-              </button>
-            `
-          )
-          .join("")}
-      </div>
-      <div class="detail-panel-body"></div>
-    </div>
-  `;
+  const shell = document.createElement("div");
+  shell.className = "detail-panel-shell";
 
-  detailPanel.querySelectorAll("[data-detail-tab]").forEach((button) => {
+  const tabList = document.createElement("div");
+  tabList.className = "detail-tabs";
+  tabList.setAttribute("role", "tablist");
+  tabList.setAttribute("aria-label", "Detail panels");
+
+  tabs.forEach((tab) => {
+    const button = document.createElement("button");
+    button.className = `detail-tab${tab.id === state.activeDetailTab ? " is-active" : ""}`;
+    button.type = "button";
+    button.setAttribute("role", "tab");
+    button.setAttribute("aria-selected", tab.id === state.activeDetailTab ? "true" : "false");
+    button.dataset.detailTab = tab.id;
+    button.textContent = tab.label;
     button.addEventListener("click", () => {
-      const nextTab = button.getAttribute("data-detail-tab");
+      const nextTab = button.dataset.detailTab;
       if (!nextTab || nextTab === state.activeDetailTab) {
         return;
       }
 
       setActiveDetailTab(nextTab);
     });
+    tabList.append(button);
   });
 
-  const panelBody = detailPanel.querySelector(".detail-panel-body");
+  const panelBody = document.createElement("div");
+  panelBody.className = "detail-panel-body";
+  shell.append(tabList, panelBody);
+  detailPanel.replaceChildren(shell);
   lastDetailPanelSignature = createDetailPanelSignature();
 
   if (state.activeDetailTab === "queue") {
@@ -9448,14 +9539,26 @@ function renderDetailPanel() {
   }
 
   if (!activeTrack) {
-    panelBody.innerHTML = `
-      <div class="detail-art">${noteIcon()}</div>
-      <div class="detail-copy">
-        <p class="detail-meta">Apollo</p>
-        <h2>Music, arranged around Apollo.</h2>
-        <p class="detail-description">Use the top bar to show or hide the library and detail panels, resize panes with the dividers, and keep search focused on Apollo results.</p>
-      </div>
-    `;
+    const detailArt = document.createElement("div");
+    detailArt.className = "detail-art";
+    detailArt.append(createTrustedMarkupNode(noteIcon()));
+
+    const detailCopy = document.createElement("div");
+    detailCopy.className = "detail-copy";
+
+    const meta = document.createElement("p");
+    meta.className = "detail-meta";
+    meta.textContent = "Apollo";
+
+    const heading = document.createElement("h2");
+    heading.textContent = "Music, arranged around Apollo.";
+
+    const description = document.createElement("p");
+    description.className = "detail-description";
+    description.textContent = "Use the top bar to show or hide the library and detail panels, resize panes with the dividers, and keep search focused on Apollo results.";
+
+    detailCopy.append(meta, heading, description);
+    panelBody.replaceChildren(detailArt, detailCopy);
     return;
   }
 
@@ -9467,19 +9570,45 @@ function renderDetailPanel() {
         ? "This remote result matches a track already in the Apollo library. Playlist and playback actions are available without downloading it again."
         : "This is a remote result. Save it to the Apollo server library with metadata or download it directly to the client.";
 
-  panelBody.innerHTML = `
-    <div class="detail-art">${renderArtwork(activeTrack, "detail-art-image")}</div>
-    <div class="detail-copy">
-      <p class="detail-meta">${escapeHtml(providerLabel(activeTrack.provider, activeTrack.requestedProvider))}</p>
-      <h2>${escapeHtml(activeTrack.title)}</h2>
-      <p class="detail-description">${escapeHtml(activeTrack.artist)}${activeTrack.album ? ` | ${escapeHtml(activeTrack.album)}` : ""}</p>
-      <p class="detail-description">${detailText}</p>
-    </div>
-    <div class="detail-tags">
-      <span class="detail-tag">${formatDuration(getCachedDuration(activeTrack), "--:--")}</span>
-      <span class="detail-tag">${activeTrack.resultSource === "library" ? "Local" : "Remote"}</span>
-    </div>
-  `;
+  const detailArt = document.createElement("div");
+  detailArt.className = "detail-art";
+  detailArt.append(createArtworkNode(activeTrack, "detail-art-image"));
+
+  const detailCopy = document.createElement("div");
+  detailCopy.className = "detail-copy";
+
+  const meta = document.createElement("p");
+  meta.className = "detail-meta";
+  meta.textContent = providerLabel(activeTrack.provider, activeTrack.requestedProvider);
+
+  const heading = document.createElement("h2");
+  heading.textContent = activeTrack.title;
+
+  const summary = document.createElement("p");
+  summary.className = "detail-description";
+  summary.textContent = activeTrack.album
+    ? `${activeTrack.artist} | ${activeTrack.album}`
+    : activeTrack.artist;
+
+  const description = document.createElement("p");
+  description.className = "detail-description";
+  description.textContent = detailText;
+
+  detailCopy.append(meta, heading, summary, description);
+
+  const detailTags = document.createElement("div");
+  detailTags.className = "detail-tags";
+
+  const durationTag = document.createElement("span");
+  durationTag.className = "detail-tag";
+  durationTag.textContent = formatDuration(getCachedDuration(activeTrack), "--:--");
+
+  const sourceTag = document.createElement("span");
+  sourceTag.className = "detail-tag";
+  sourceTag.textContent = activeTrack.resultSource === "library" ? "Local" : "Remote";
+
+  detailTags.append(durationTag, sourceTag);
+  panelBody.replaceChildren(detailArt, detailCopy, detailTags);
 }
 
 function renderNowPlaying() {
@@ -9489,37 +9618,101 @@ function renderNowPlaying() {
   }
 
   if (!currentTrack) {
-    nowPlaying.innerHTML = `
-      <div class="now-playing-shell">
-        <div class="now-playing-art">${noteIcon()}</div>
-      <div class="now-playing-meta">
-        <p class="now-playing-title">Nothing playing</p>
-        <p class="now-playing-subtitle">Select a track from the library or search results.</p>
-      </div>
-      </div>
-      <button class="like-button" type="button" aria-label="Like track" aria-pressed="false" disabled>${heartIcon(false)}</button>
-    `;
+    const shell = document.createElement("div");
+    shell.className = "now-playing-shell";
+
+    const art = document.createElement("div");
+    art.className = "now-playing-art";
+    art.append(createTrustedMarkupNode(noteIcon()));
+
+    const meta = document.createElement("div");
+    meta.className = "now-playing-meta";
+
+    const title = document.createElement("p");
+    title.className = "now-playing-title";
+    title.textContent = "Nothing playing";
+
+    const subtitle = document.createElement("p");
+    subtitle.className = "now-playing-subtitle";
+    subtitle.textContent = "Select a track from the library or search results.";
+
+    meta.append(title, subtitle);
+    shell.append(art, meta);
+
+    const likeButton = document.createElement("button");
+    likeButton.className = "like-button";
+    likeButton.type = "button";
+    likeButton.setAttribute("aria-label", "Like track");
+    likeButton.setAttribute("aria-pressed", "false");
+    likeButton.disabled = true;
+    likeButton.append(createTrustedMarkupNode(heartIcon(false)));
+
+    nowPlaying.replaceChildren(shell, likeButton);
     lastNowPlayingSignature = createNowPlayingSignature();
     return;
   }
 
   const liked = isTrackLiked(currentTrack.key);
   const showLeaveListenAlong = Boolean(listenAlongState.joinedSessionId);
-  nowPlaying.innerHTML = `
-    <div class="now-playing-shell">
-      <div class="now-playing-art">${renderArtwork(currentTrack, "now-playing-art-image")}</div>
-      <div class="now-playing-meta">
-        <p class="now-playing-title">${escapeHtml(currentTrack.title)}</p>
-        <button class="now-playing-artist" type="button">${escapeHtml(currentTrack.artist)}</button>
-      </div>
-    </div>
-    <div class="now-playing-actions">
-      <button class="now-playing-icon-button" type="button" data-now-playing-action="share" aria-label="Share track">${shareIcon()}</button>
-      <button class="now-playing-icon-button" type="button" data-now-playing-action="download" aria-label="Download track">${saveToApolloIcon()}</button>
-      ${showLeaveListenAlong ? '<button class="now-playing-pill-button" type="button" data-now-playing-action="leave-listen-along">Leave listen along</button>' : ""}
-      <button class="like-button${liked ? " is-liked" : ""}" type="button" aria-label="Like track" aria-pressed="${liked}">${heartIcon(liked)}</button>
-    </div>
-  `;
+  const shell = document.createElement("div");
+  shell.className = "now-playing-shell";
+
+  const art = document.createElement("div");
+  art.className = "now-playing-art";
+  art.append(createArtworkNode(currentTrack, "now-playing-art-image"));
+
+  const meta = document.createElement("div");
+  meta.className = "now-playing-meta";
+
+  const title = document.createElement("p");
+  title.className = "now-playing-title";
+  title.textContent = currentTrack.title || "Unknown Title";
+
+  const artistButton = document.createElement("button");
+  artistButton.className = "now-playing-artist";
+  artistButton.type = "button";
+  artistButton.textContent = currentTrack.artist || "Unknown Artist";
+
+  meta.append(title, artistButton);
+  shell.append(art, meta);
+
+  const actions = document.createElement("div");
+  actions.className = "now-playing-actions";
+
+  const shareActionButton = document.createElement("button");
+  shareActionButton.className = "now-playing-icon-button";
+  shareActionButton.type = "button";
+  shareActionButton.dataset.nowPlayingAction = "share";
+  shareActionButton.setAttribute("aria-label", "Share track");
+  shareActionButton.append(createTrustedMarkupNode(shareIcon()));
+
+  const downloadActionButton = document.createElement("button");
+  downloadActionButton.className = "now-playing-icon-button";
+  downloadActionButton.type = "button";
+  downloadActionButton.dataset.nowPlayingAction = "download";
+  downloadActionButton.setAttribute("aria-label", "Download track");
+  downloadActionButton.append(createTrustedMarkupNode(saveToApolloIcon()));
+
+  actions.append(shareActionButton, downloadActionButton);
+
+  if (showLeaveListenAlong) {
+    const leaveButton = document.createElement("button");
+    leaveButton.className = "now-playing-pill-button";
+    leaveButton.type = "button";
+    leaveButton.dataset.nowPlayingAction = "leave-listen-along";
+    leaveButton.textContent = "Leave listen along";
+    actions.append(leaveButton);
+  }
+
+  const likeButton = document.createElement("button");
+  likeButton.className = `like-button${liked ? " is-liked" : ""}`;
+  likeButton.type = "button";
+  likeButton.setAttribute("aria-label", "Like track");
+  likeButton.setAttribute("aria-pressed", liked ? "true" : "false");
+  likeButton.append(createTrustedMarkupNode(heartIcon(liked)));
+  actions.append(likeButton);
+
+  nowPlaying.replaceChildren(shell, actions);
 
   nowPlaying.querySelector(".now-playing-artist").addEventListener("click", () => {
     replaceCurrentNavigationHistoryState();
@@ -9829,6 +10022,21 @@ async function prepareAudioElementForTrack(element, track, { requestId = 0, tran
   return nextUrl;
 }
 
+function commitLoadingPlaybackTrack(track, { includeTracks = true, includeDetail = true } = {}) {
+  if (!track?.key || state.playbackTrackKey === track.key) {
+    return;
+  }
+
+  state.playbackTrackKey = track.key;
+  persistPlaybackState();
+  renderPlaybackUi({
+    includeTracks,
+    includeDetail
+  });
+  updateSystemMediaSessionMetadata();
+  syncDiscordPresence();
+}
+
 function finalizeTrackStart(track, {
   previousTrack = null,
   previousElement = null,
@@ -9973,6 +10181,10 @@ async function playResolvedTrack(track, {
         state.playbackPendingTrackKey = "";
       }
       return false;
+    }
+
+    if (!useCrossfade || targetElement === previousElement) {
+      commitLoadingPlaybackTrack(track);
     }
 
     if (useCrossfade && targetElement !== previousElement) {

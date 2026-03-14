@@ -1,26 +1,42 @@
+const appliedThemeVariableNames = new WeakMap();
+
 function resolveThemeStyleElement(documentRef) {
   return documentRef.querySelector("#apollo-theme-style");
 }
 
 export function applyConfiguredTheme(theme, documentRef = document) {
-  if (!theme || typeof theme !== "object") {
-    return;
-  }
+  const resolvedTheme = theme && typeof theme === "object" ? theme : {};
 
   const rootStyle = documentRef.documentElement?.style;
-  if (rootStyle && theme.variables && typeof theme.variables === "object") {
-    Object.entries(theme.variables).forEach(([key, value]) => {
-      if (typeof key === "string" && typeof value === "string" && key.startsWith("--")) {
+  if (rootStyle) {
+    const nextVariableNames = new Set();
+
+    if (resolvedTheme.variables && typeof resolvedTheme.variables === "object") {
+      Object.entries(resolvedTheme.variables).forEach(([key, value]) => {
+        if (typeof key !== "string" || typeof value !== "string" || !key.startsWith("--")) {
+          return;
+        }
+
         rootStyle.setProperty(key, value);
+        nextVariableNames.add(key);
+      });
+    }
+
+    // Theme files can be swapped live, so stale overrides need to be removed explicitly.
+    for (const variableName of appliedThemeVariableNames.get(documentRef) || []) {
+      if (!nextVariableNames.has(variableName)) {
+        rootStyle.removeProperty(variableName);
       }
-    });
+    }
+
+    appliedThemeVariableNames.set(documentRef, Array.from(nextVariableNames));
   }
 
   const existingThemeStyle = resolveThemeStyleElement(documentRef);
-  if (typeof theme.css === "string" && theme.css) {
+  if (typeof resolvedTheme.css === "string" && resolvedTheme.css) {
     const styleElement = existingThemeStyle || documentRef.createElement("style");
     styleElement.id = "apollo-theme-style";
-    styleElement.textContent = theme.css;
+    styleElement.textContent = resolvedTheme.css;
     if (!existingThemeStyle) {
       documentRef.head.append(styleElement);
     }

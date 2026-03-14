@@ -44,11 +44,16 @@ const runtimeInfo = (() => {
 })();
 
 function logRendererEvent(source, message, details = null) {
-  ipcRenderer.send("app:log", {
-    source,
-    message,
-    details
-  });
+  try {
+    ipcRenderer.send("app:log", {
+      source,
+      message,
+      details
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 const runtimeAssets = createRuntimeAssetsService({
@@ -111,8 +116,7 @@ contextBridge.exposeInMainWorld("apolloDesktop", {
     available: true,
     getPath: () => runtimeInfo.logPath || "",
     write: (source, message, details) => {
-      logRendererEvent(source || "renderer", message || "", details ?? null);
-      return true;
+      return logRendererEvent(source || "renderer", message || "", details ?? null);
     }
   },
   runtimeAssets: {

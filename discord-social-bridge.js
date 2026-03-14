@@ -94,9 +94,14 @@ function createDiscordSocialBridge({
       return false;
     }
 
-    helperProcess.stdin.write(`${parts.join("\t")}\n`);
-    log(`sendCommand ok command=${parts[0] || "unknown"}`);
-    return true;
+    try {
+      helperProcess.stdin.write(`${parts.join("\t")}\n`);
+      log(`sendCommand ok command=${parts[0] || "unknown"}`);
+      return true;
+    } catch (error) {
+      log(`sendCommand failed command=${parts[0] || "unknown"} error=${error?.message || "unknown"}`);
+      return false;
+    }
   }
 
   const pendingRequests = new Map();
@@ -191,6 +196,21 @@ function createDiscordSocialBridge({
     }
   }
 
+  function markHelperStopped(message, { rejectMessage = message } = {}) {
+    helperProcess = null;
+    helperStdoutBuffer = "";
+    helperExitPromise = null;
+    rejectPendingRequests(rejectMessage);
+
+    emitState({
+      helperRunning: false,
+      authenticated: false,
+      ready: false,
+      authInProgress: false,
+      message
+    });
+  }
+
   function attachHelperListeners() {
     helperExitPromise = new Promise((resolve) => {
       helperProcess.once("exit", resolve);
@@ -222,18 +242,18 @@ function createDiscordSocialBridge({
       }
     });
 
+    helperProcess.on("error", (error) => {
+      const message = `Discord helper failed to start: ${error?.message || "unknown error"}.`;
+      log(`helper error=${error?.message || "unknown"}`);
+      markHelperStopped(message, {
+        rejectMessage: "Discord helper failed to start."
+      });
+    });
+
     helperProcess.on("exit", (code) => {
       log(`helper exit code=${code}`);
-      helperProcess = null;
-      helperStdoutBuffer = "";
-      helperExitPromise = null;
-      rejectPendingRequests("Discord helper stopped.");
-
-      emitState({
-        helperRunning: false,
-        ready: false,
-        authInProgress: false,
-        message: code === 0 ? "Discord helper stopped." : `Discord helper exited with code ${code}.`
+      markHelperStopped(code === 0 ? "Discord helper stopped." : `Discord helper exited with code ${code}.`, {
+        rejectMessage: "Discord helper stopped."
       });
     });
   }

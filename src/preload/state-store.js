@@ -1,10 +1,20 @@
+function notifyListener(listener, value, phase) {
+  try {
+    listener(value);
+  } catch (error) {
+    console.warn(`[apollo-state-store] ${phase} listener failed`, error);
+  }
+}
+
 function createEventChannel() {
   const listeners = new Set();
 
   function emit(value) {
-    listeners.forEach((listener) => {
-      listener(value);
-    });
+    // Snapshot subscribers so one listener can unsubscribe itself without
+    // disturbing the rest of the delivery pass.
+    for (const listener of [...listeners]) {
+      notifyListener(listener, value, "event");
+    }
   }
 
   function subscribe(callback, getInitialValue = null) {
@@ -15,7 +25,7 @@ function createEventChannel() {
     listeners.add(callback);
 
     if (typeof getInitialValue === "function") {
-      callback(getInitialValue());
+      notifyListener(callback, getInitialValue(), "initial");
     }
 
     return () => {
@@ -49,7 +59,7 @@ function createStateStore(initialState) {
   }
 
   function patchState(patch = {}) {
-    if (!patch || typeof patch !== "object") {
+    if (!patch || typeof patch !== "object" || Array.isArray(patch)) {
       return currentState;
     }
 

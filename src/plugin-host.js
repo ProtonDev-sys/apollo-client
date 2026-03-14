@@ -69,10 +69,18 @@ export function createPluginHost(sharedApi) {
     });
   }
 
+  function ensureUniqueRegistration(items, id, description) {
+    if (items.some((entry) => entry.id === id)) {
+      throw new Error(`${description} "${id}" is already registered.`);
+    }
+  }
+
   function registerDetailTab(plugin, tab) {
     if (!tab?.id || !tab?.label || typeof tab.mount !== "function") {
       throw new Error(`Plugin "${plugin.id}" registered an invalid detail tab.`);
     }
+
+    ensureUniqueRegistration(detailTabs, tab.id, "Detail tab");
 
     detailTabs.push({
       ...tab,
@@ -85,6 +93,8 @@ export function createPluginHost(sharedApi) {
     if (!provider?.id || !provider?.name || typeof provider.resolve !== "function") {
       throw new Error(`Plugin "${plugin.id}" registered an invalid lyrics provider.`);
     }
+
+    ensureUniqueRegistration(lyricsProviders, provider.id, "Lyrics provider");
 
     lyricsProviders.push({
       ...provider,
@@ -130,6 +140,11 @@ export function createPluginHost(sharedApi) {
   async function loadPlugins(pluginModules) {
     for (const plugin of pluginModules) {
       if (!plugin?.id || typeof plugin.setup !== "function") {
+        continue;
+      }
+
+      if (pluginApis.has(plugin.id)) {
+        console.warn(`[apollo-plugin-host] duplicate plugin id "${plugin.id}" ignored`);
         continue;
       }
 
@@ -198,24 +213,31 @@ export function createPluginHost(sharedApi) {
     }
 
     const mountSubscriptions = [];
-    const cleanup = tab.mount({
-      container,
-      context,
-      api: pluginApis.get(tab.pluginId) || sharedApi,
-      apollo: sharedApi.apollo,
-      plugin: {
-        id: tab.pluginId
-      },
-      services: {
-        resolveLyrics,
-        emit,
-        on(eventName, handler) {
-          const unsubscribe = subscribe(eventName, handler);
-          mountSubscriptions.push(unsubscribe);
-          return unsubscribe;
+    let cleanup = () => {};
+
+    try {
+      cleanup = tab.mount({
+        container,
+        context,
+        api: pluginApis.get(tab.pluginId) || sharedApi,
+        apollo: sharedApi.apollo,
+        plugin: {
+          id: tab.pluginId
+        },
+        services: {
+          resolveLyrics,
+          emit,
+          on(eventName, handler) {
+            const unsubscribe = subscribe(eventName, handler);
+            mountSubscriptions.push(unsubscribe);
+            return unsubscribe;
+          }
         }
-      }
-    });
+      }) || (() => {});
+    } catch (error) {
+      container.textContent = "Panel unavailable.";
+      console.warn(`[apollo-plugin-host] failed to mount detail tab "${tab.id}"`, error);
+    }
 
     return () => {
       if (typeof cleanup === "function") {
@@ -238,6 +260,9 @@ export function createPluginHost(sharedApi) {
       disposer();
     }
 
+    plugins.length = 0;
+    detailTabs.length = 0;
+    lyricsProviders.length = 0;
     pluginDisposers.clear();
     pluginApis.clear();
     eventListeners.clear();

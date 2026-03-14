@@ -45,6 +45,8 @@ Requirements:
 - `setup(api)` is required
 - `name` is optional
 
+Apollo also expects anything a plugin registers into shared runtime space to stay unique. Reusing another plugin's detail-tab id or lyrics-provider id is now treated as a load error.
+
 `setup(api)` may return a cleanup function. The host runs it when the renderer unloads.
 
 ## Setup API

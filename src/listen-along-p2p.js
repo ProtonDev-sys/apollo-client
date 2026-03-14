@@ -11,6 +11,7 @@ const UPNP_SERVICE_TYPES = [
   "urn:schemas-upnp-org:service:WANIPConnection:1",
   "urn:schemas-upnp-org:service:WANPPPConnection:1"
 ];
+const ALLOWED_UPSTREAM_PROTOCOLS = new Set(["http:", "https:"]);
 const PRIVATE_IPV4_PATTERN = /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/;
 
 function dedupeStrings(values = []) {
@@ -260,8 +261,28 @@ function createServerState(server, available, message = "", options = {}) {
   };
 }
 
+function normaliseStreamUrl(value) {
+  const rawUrl = String(value || "").trim();
+  if (!rawUrl) {
+    throw new Error("Listen along source stream URL is required.");
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(rawUrl);
+  } catch {
+    throw new Error("Listen along source stream URL is invalid.");
+  }
+
+  if (!ALLOWED_UPSTREAM_PROTOCOLS.has(parsedUrl.protocol)) {
+    throw new Error("Listen along source streams must use http:// or https:// URLs.");
+  }
+
+  return parsedUrl.toString();
+}
+
 function createUpstreamRequest(urlString, headers = {}) {
-  const targetUrl = new URL(urlString);
+  const targetUrl = new URL(normaliseStreamUrl(urlString));
   const transport = targetUrl.protocol === "https:" ? https : http;
 
   return transport.request(targetUrl, {
@@ -371,7 +392,7 @@ function createListenAlongServer({ logger = () => {} } = {}) {
       const statusCode = Number(upstreamResponse.statusCode) || 500;
       const location = upstreamResponse.headers.location;
       if ([301, 302, 303, 307, 308].includes(statusCode) && location && redirectCount < MAX_REDIRECTS) {
-        session.sourceStreamUrl = new URL(location, session.sourceStreamUrl).toString();
+        session.sourceStreamUrl = normaliseStreamUrl(new URL(location, session.sourceStreamUrl).toString());
         upstreamResponse.resume();
         proxyStream(request, response, session, redirectCount + 1);
         return;
@@ -527,7 +548,7 @@ function createListenAlongServer({ logger = () => {} } = {}) {
     const sessionId = String(payload.sessionId || "").trim();
     const token = String(payload.token || createToken()).trim();
     const trackId = String(payload.trackId || "").trim();
-    const sourceStreamUrl = String(payload.sourceStreamUrl || "").trim();
+    const sourceStreamUrl = normaliseStreamUrl(payload.sourceStreamUrl);
 
     if (!sessionId || !token || !trackId || !sourceStreamUrl) {
       throw new Error("Listen along publish payload is incomplete.");

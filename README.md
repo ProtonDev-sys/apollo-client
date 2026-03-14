@@ -27,6 +27,18 @@ Install dependencies:
 npm install
 ```
 
+Run the syntax pass across the JavaScript surface:
+
+```sh
+npm run check:syntax
+```
+
+Run the baseline verification checks:
+
+```sh
+npm run verify
+```
+
 Launch the desktop client:
 
 ```sh
@@ -106,6 +118,8 @@ Plugins are also disk-backed runtime assets now. Apollo seeds `lyrics-plugin.js`
 - `plugins/` in the Electron user-data directory
 
 Renderer-side plugin and theme directories are watched. Editing a plugin or theme file reloads it without rebuilding the app.
+
+Plugin ids, detail-tab ids, and lyrics-provider ids must be unique across the active runtime. Apollo now treats duplicate registrations as load errors instead of silently shadowing earlier plugins.
 
 ### Logs
 

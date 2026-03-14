@@ -20,6 +20,7 @@ function createListenAlongSignaling({
   const subscribedRooms = new Set();
   let client = null;
   let connectPromise = null;
+  let connectingClient = null;
 
   function buildTopic(sessionId) {
     return `${topicPrefix}/${String(sessionId || "").trim()}`;
@@ -34,7 +35,7 @@ function createListenAlongSignaling({
     return stateStore.setState({
       ...stateStore.getState(),
       ...patch,
-      rooms: Array.from(subscribedRooms),
+      rooms: Array.from(subscribedRooms).sort(),
       brokerUrl
     });
   }
@@ -116,12 +117,16 @@ function createListenAlongSignaling({
         connectTimeout: 10000,
         clean: true
       });
+      connectingClient = nextClient;
 
       attachClient(nextClient);
 
       const cleanup = () => {
         nextClient.off("connect", onConnect);
         nextClient.off("error", onError);
+        if (connectingClient === nextClient) {
+          connectingClient = null;
+        }
         connectPromise = null;
       };
 
@@ -156,8 +161,11 @@ function createListenAlongSignaling({
       throw new Error("Listen along session ID is required.");
     }
 
+    if (subscribedRooms.has(resolvedSessionId)) {
+      return emitState();
+    }
+
     const resolvedClient = await ensureClient();
-    subscribedRooms.add(resolvedSessionId);
 
     await new Promise((resolve, reject) => {
       resolvedClient.subscribe(buildTopic(resolvedSessionId), (error) => {
@@ -170,6 +178,7 @@ function createListenAlongSignaling({
       });
     });
 
+    subscribedRooms.add(resolvedSessionId);
     return emitState();
   }
 
@@ -225,6 +234,14 @@ function createListenAlongSignaling({
   }
 
   function dispose() {
+    if (connectingClient) {
+      try {
+        connectingClient.end(true);
+      } catch {
+        // Ignore MQTT teardown failures.
+      }
+    }
+
     if (client) {
       try {
         client.end(true);
@@ -234,6 +251,7 @@ function createListenAlongSignaling({
     }
 
     client = null;
+    connectingClient = null;
     connectPromise = null;
     subscribedRooms.clear();
     emitState({

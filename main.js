@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, shell } = require("electron");
 const path = require("node:path");
 const fs = require("node:fs");
+const { pathToFileURL } = require("node:url");
 const { createDiscordPresenceController } = require("./discord-presence");
 const { createDiscordSocialBridge } = require("./discord-social-bridge");
 const { createListenAlongServer } = require("./src/listen-along-p2p");
@@ -14,6 +15,9 @@ const GITHUB_REPO_BRANCH = process.env.APOLLO_CLIENT_GITHUB_BRANCH || "main";
 const GITHUB_PACKAGE_URL = `https://raw.githubusercontent.com/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/${GITHUB_REPO_BRANCH}/package.json`;
 const GITHUB_REPO_URL = `https://github.com/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}`;
 const CLIENT_UPDATE_TIMEOUT_MS = 5000;
+const ALLOWED_EXTERNAL_PROTOCOLS = new Set(["http:", "https:"]);
+const TRUSTED_RENDERER_ENTRY_PATH = path.join(__dirname, "src", "index.html");
+const TRUSTED_RENDERER_ENTRY_URL = pathToFileURL(TRUSTED_RENDERER_ENTRY_PATH).toString();
 
 const discordPresence = createDiscordPresenceController({
   appName: "Apollo Client",
@@ -69,6 +73,27 @@ function logDiscord(message) {
   if (discordLogFilePath && discordLogFilePath !== appLogFilePath) {
     appendLogLine(discordLogFilePath, "discord", message);
   }
+}
+
+function safeJsonStringify(value) {
+  const seen = new WeakSet();
+
+  return JSON.stringify(value, (_key, currentValue) => {
+    if (typeof currentValue === "bigint") {
+      return currentValue.toString();
+    }
+
+    if (!currentValue || typeof currentValue !== "object") {
+      return currentValue;
+    }
+
+    if (seen.has(currentValue)) {
+      return "[Circular]";
+    }
+
+    seen.add(currentValue);
+    return currentValue;
+  });
 }
 
 function buildRuntimeInfo() {
@@ -215,7 +240,11 @@ function sendToWindow(window, channel, payload) {
     return;
   }
 
-  window.webContents.send(channel, payload);
+  try {
+    window.webContents.send(channel, payload);
+  } catch (error) {
+    logApp("ipc", `failed to send channel=${channel} error=${error?.message || "unknown"}`);
+  }
 }
 
 function sendWindowState(window) {
@@ -224,6 +253,80 @@ function sendWindowState(window) {
 
 function getEventWindow(event) {
   return BrowserWindow.fromWebContents(event.sender);
+}
+
+function isTrustedRendererUrl(value) {
+  try {
+    const candidateUrl = new URL(String(value || ""));
+    const trustedUrl = new URL(TRUSTED_RENDERER_ENTRY_URL);
+    return candidateUrl.protocol === trustedUrl.protocol && candidateUrl.pathname === trustedUrl.pathname;
+  } catch {
+    return false;
+  }
+}
+
+function describeIpcSender(event) {
+  return String(event?.senderFrame?.url || event?.sender?.getURL?.() || "").trim();
+}
+
+function assertTrustedIpcEvent(event, channel) {
+  const senderUrl = describeIpcSender(event);
+  const senderMatchesWindow = Boolean(mainWindow && !mainWindow.isDestroyed() && event?.sender === mainWindow.webContents);
+  if (senderMatchesWindow && isTrustedRendererUrl(senderUrl)) {
+    return;
+  }
+
+  logApp("security", `blocked ipc channel=${channel} sender=${senderUrl || "unknown"}`);
+  throw new Error("IPC sender is not authorised.");
+}
+
+function handleTrustedIpc(channel, listener) {
+  ipcMain.handle(channel, async (event, ...args) => {
+    assertTrustedIpcEvent(event, channel);
+    return listener(event, ...args);
+  });
+}
+
+function onTrustedIpc(channel, listener) {
+  ipcMain.on(channel, (event, ...args) => {
+    assertTrustedIpcEvent(event, channel);
+    return listener(event, ...args);
+  });
+}
+
+function normaliseExternalUrl(url) {
+  const targetUrl = String(url || "").trim();
+  if (!targetUrl) {
+    return "";
+  }
+
+  try {
+    const parsedUrl = new URL(targetUrl);
+    if (!ALLOWED_EXTERNAL_PROTOCOLS.has(parsedUrl.protocol)) {
+      return "";
+    }
+
+    return parsedUrl.toString();
+  } catch {
+    return "";
+  }
+}
+
+async function openExternalUrl(targetUrl, source = "unknown") {
+  const safeUrl = normaliseExternalUrl(targetUrl);
+  if (!safeUrl) {
+    logApp("security", `blocked external url source=${source} url=${String(targetUrl || "").trim() || "unknown"}`);
+    return false;
+  }
+
+  try {
+    await shell.openExternal(safeUrl);
+    logApp("main", `opened external url source=${source} url=${safeUrl}`);
+    return true;
+  } catch (error) {
+    logApp("main", `failed external url source=${source} url=${safeUrl} error=${error?.message || "unknown"}`);
+    return false;
+  }
 }
 
 function getUnavailableDiscordSocialState() {
@@ -254,7 +357,7 @@ if (!hasSingleInstanceLock) {
   app.quit();
 }
 
-ipcMain.handle("discord-presence:configure", (_event, config) => {
+handleTrustedIpc("discord-presence:configure", (_event, config) => {
   latestDiscordConfig = config;
   logDiscord(`configure enabled=${Boolean(config?.enabled)} clientId=${config?.clientId || ""}`);
   if (discordSocial) {
@@ -263,33 +366,33 @@ ipcMain.handle("discord-presence:configure", (_event, config) => {
   return syncDiscordPresence();
 });
 
-ipcMain.on("discord-presence:update-playback", (_event, playback) => {
+onTrustedIpc("discord-presence:update-playback", (_event, playback) => {
   latestDiscordPlayback = playback;
   logDiscord(`update-playback title=${playback?.title || ""} status=${playback?.status || ""}`);
   void syncDiscordPresence();
 });
 
-ipcMain.on("discord-presence:clear", () => {
+onTrustedIpc("discord-presence:clear", () => {
   latestDiscordPlayback = null;
   logDiscord("clear-playback");
   void syncDiscordPresence();
 });
 
-ipcMain.handle("discord-social:get-state", () => {
+handleTrustedIpc("discord-social:get-state", () => {
   return getDiscordSocialState();
 });
 
-ipcMain.handle("discord-social:start-auth", async () => {
+handleTrustedIpc("discord-social:start-auth", async () => {
   discordSocial?.startAuth();
   return getDiscordSocialState();
 });
 
-ipcMain.handle("discord-social:sign-out", async () => {
+handleTrustedIpc("discord-social:sign-out", async () => {
   discordSocial?.signOut();
   return getDiscordSocialState();
 });
 
-ipcMain.handle("discord-social:list-friends", async () => {
+handleTrustedIpc("discord-social:list-friends", async () => {
   if (!discordSocial) {
     return [];
   }
@@ -297,7 +400,7 @@ ipcMain.handle("discord-social:list-friends", async () => {
   return discordSocial.listFriends();
 });
 
-ipcMain.handle("discord-social:send-activity-invite", async (_event, payload) => {
+handleTrustedIpc("discord-social:send-activity-invite", async (_event, payload) => {
   if (!discordSocial) {
     throw new Error("Discord Social SDK is unavailable.");
   }
@@ -305,11 +408,11 @@ ipcMain.handle("discord-social:send-activity-invite", async (_event, payload) =>
   return discordSocial.sendActivityInvite(payload || {});
 });
 
-ipcMain.handle("listen-along:get-state", async () => {
+handleTrustedIpc("listen-along:get-state", async () => {
   return getListenAlongState();
 });
 
-ipcMain.handle("listen-along:publish-session", async (_event, payload) => {
+handleTrustedIpc("listen-along:publish-session", async (_event, payload) => {
   if (!listenAlongServer) {
     throw new Error("Listen along server is unavailable.");
   }
@@ -319,16 +422,18 @@ ipcMain.handle("listen-along:publish-session", async (_event, payload) => {
   return result;
 });
 
-ipcMain.handle("listen-along:clear-session", async (_event, sessionId) => {
+handleTrustedIpc("listen-along:clear-session", async (_event, sessionId) => {
   listenAlongServer?.clearSession?.(sessionId);
-  return listenAlongServer?.getState?.() || null;
+  const nextState = listenAlongServer?.getState?.() || null;
+  sendListenAlongState();
+  return nextState;
 });
 
-ipcMain.on("app:get-runtime-info-sync", (event) => {
+onTrustedIpc("app:get-runtime-info-sync", (event) => {
   event.returnValue = buildRuntimeInfo();
 });
 
-ipcMain.handle("app:get-pending-client-update", () => {
+handleTrustedIpc("app:get-pending-client-update", () => {
   if (!pendingClientUpdateNotice) {
     return null;
   }
@@ -339,7 +444,7 @@ ipcMain.handle("app:get-pending-client-update", () => {
   };
 });
 
-ipcMain.handle("app:ack-client-update-required", () => {
+handleTrustedIpc("app:ack-client-update-required", () => {
   if (!pendingClientUpdateNotice) {
     return false;
   }
@@ -350,29 +455,27 @@ ipcMain.handle("app:ack-client-update-required", () => {
   return true;
 });
 
-ipcMain.handle("app:open-external-url", async (_event, url) => {
-  const targetUrl = String(url || "").trim();
-  if (!targetUrl) {
-    return false;
-  }
-
-  await shell.openExternal(targetUrl);
-  logApp("main", `opened external url=${targetUrl}`);
-  return true;
+handleTrustedIpc("app:open-external-url", async (_event, url) => {
+  return openExternalUrl(url, "ipc");
 });
 
-ipcMain.on("app:log", (_event, payload) => {
+onTrustedIpc("app:log", (_event, payload) => {
   if (!payload || typeof payload !== "object") {
     return;
   }
 
   const source = String(payload.source || "renderer").trim() || "renderer";
   const message = String(payload.message || "").trim();
-  const details = typeof payload.details === "string"
-    ? payload.details.trim()
-    : payload.details != null
-      ? JSON.stringify(payload.details)
-      : "";
+  let details = "";
+  if (typeof payload.details === "string") {
+    details = payload.details.trim();
+  } else if (payload.details != null) {
+    try {
+      details = safeJsonStringify(payload.details) || "";
+    } catch {
+      details = "[unserializable]";
+    }
+  }
 
   if (!message && !details) {
     return;
@@ -381,15 +484,15 @@ ipcMain.on("app:log", (_event, payload) => {
   logApp(source, details ? `${message} ${details}`.trim() : message);
 });
 
-ipcMain.handle("window-controls:get-state", (event) => {
+handleTrustedIpc("window-controls:get-state", (event) => {
   return buildWindowState(getEventWindow(event));
 });
 
-ipcMain.on("window-controls:minimize", (event) => {
+onTrustedIpc("window-controls:minimize", (event) => {
   getEventWindow(event)?.minimize();
 });
 
-ipcMain.on("window-controls:toggle-maximize", (event) => {
+onTrustedIpc("window-controls:toggle-maximize", (event) => {
   const window = getEventWindow(event);
   if (!window) {
     return;
@@ -402,7 +505,7 @@ ipcMain.on("window-controls:toggle-maximize", (event) => {
   }
 });
 
-ipcMain.on("window-controls:close", (event) => {
+onTrustedIpc("window-controls:close", (event) => {
   getEventWindow(event)?.close();
 });
 
@@ -588,6 +691,22 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: false
     }
+  });
+
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    void openExternalUrl(url, "window-open");
+    return {
+      action: "deny"
+    };
+  });
+
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    if (isTrustedRendererUrl(url)) {
+      return;
+    }
+
+    event.preventDefault();
+    void openExternalUrl(url, "navigation");
   });
 
   mainWindow.webContents.on("preload-error", (_event, preloadPath, error) => {
