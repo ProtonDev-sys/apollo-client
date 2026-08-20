@@ -30,7 +30,104 @@ jobs:
           node-version: 22.x
           cache: npm
       - name: Apply reviewed hardening fixes
-        run: python3 scripts/apply-coderabbit-resource-fixes.py
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          patch_path = Path("scripts/apply-coderabbit-resource-fixes.py")
+          source = patch_path.read_text(encoding="utf-8")
+          replacements = (
+              (
+                  "resource_test = resource_test.rstrip() + '''",
+                  "resource_test = resource_test.rstrip() + r'''",
+              ),
+              (
+                  "    '''test(\"log text is exactly byte bounded without corrupting UTF-8\"",
+                  "    r'''test(\"log text is exactly byte bounded without corrupting UTF-8\"",
+              ),
+              (
+                  "mqtt_test = mqtt_test.rstrip() + '''",
+                  "mqtt_test = mqtt_test.rstrip() + r'''",
+              ),
+          )
+          for old, new in replacements:
+              if source.count(old) != 1:
+                  raise SystemExit(f"review patch escaping marker was not unique: {old}")
+              source = source.replace(old, new, 1)
+          patch_path.write_text(source, encoding="utf-8")
+          PY
+          python3 scripts/apply-coderabbit-resource-fixes.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          smoke_path = Path("scripts/electron-ui-smoke.js")
+          source = smoke_path.read_text(encoding="utf-8")
+          old = '''  window.webContents.sendInputEvent({
+            type: "keyDown",
+            keyCode: "K",
+            modifiers: ["control"]
+          });
+          window.webContents.sendInputEvent({
+            type: "keyUp",
+            keyCode: "K",
+            modifiers: ["control"]
+          });
+          const focusSnapshot = await waitForCondition(
+            window,
+            `Boolean(
+              document.querySelector(".apollo-command-layer")?.classList.contains("is-open")
+              && document.activeElement?.classList.contains("apollo-command-search")
+            )`,
+            5000
+          );
+          assert.equal(Boolean(focusSnapshot), true);
+          '''
+          new = '''  const commandShortcutCondition = `Boolean(
+            document.querySelector(".apollo-command-layer")?.classList.contains("is-open")
+            && document.activeElement?.classList.contains("apollo-command-search")
+          )`;
+          let focusSnapshot = false;
+          for (const keyCode of ["k", "K"]) {
+            window.focus();
+            window.webContents.focus();
+            window.webContents.sendInputEvent({
+              type: "keyDown",
+              keyCode,
+              modifiers: ["control"]
+            });
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            window.webContents.sendInputEvent({
+              type: "keyUp",
+              keyCode,
+              modifiers: ["control"]
+            });
+
+            const deadline = Date.now() + 1500;
+            while (Date.now() < deadline) {
+              focusSnapshot = await window.webContents.executeJavaScript(
+                commandShortcutCondition,
+                true
+              ).catch(() => false);
+              if (focusSnapshot) {
+                break;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            if (focusSnapshot) {
+              break;
+            }
+          }
+
+          if (!focusSnapshot) {
+            focusSnapshot = await waitForCondition(window, commandShortcutCondition, 5000);
+          }
+          assert.equal(Boolean(focusSnapshot), true);
+          '''
+          if source.count(old) != 1:
+              raise SystemExit("native command-shortcut smoke block was not unique")
+          smoke_path.write_text(source.replace(old, new, 1), encoding="utf-8")
+          PY
       - name: Install dependencies
         run: npm ci --ignore-scripts
       - name: Validate reviewed fixes
@@ -50,6 +147,7 @@ jobs:
           git add \
             scripts/check-package-budget.js \
             scripts/check-resource-budget.js \
+            scripts/electron-ui-smoke.js \
             src/main/async-log-writer.js \
             src/renderer/resource-controls.js \
             src/preload/mqtt-websocket.js \
