@@ -63,3 +63,29 @@ jobs:
           path: test-results/apollo-client-ui.png
           if-no-files-found: error
           retention-days: 7
+
+  toolchain:
+    name: Electron audit and package smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - name: Install complete dependency tree
+        run: npm ci
+      - name: Audit complete dependency tree
+        run: npm run audit:all
+      - name: Prepare optional native resource directory
+        run: mkdir -p native-bin
+      - name: Build unpacked Linux application
+        run: npm run pack:linux:ci
+      - name: Verify packaged application structure
+        shell: bash
+        run: |
+          test -d release/linux-unpacked
+          test -f release/linux-unpacked/resources/app.asar
+          test -s release/linux-unpacked/resources/app.asar
