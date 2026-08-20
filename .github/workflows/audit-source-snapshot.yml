@@ -1,9 +1,9 @@
 name: Apply audited patch
 
 on:
-  push:
+  pull_request:
     branches:
-      - codex/continuous-audit-20260820
+      - main
 
 permissions:
   contents: write
@@ -18,14 +18,22 @@ jobs:
         with:
           ref: codex/continuous-audit-20260820
       - name: Reconstruct and verify patch
+        id: patch
         shell: bash
         run: |
           set -euo pipefail
           cat .audit-patch/part-* > /tmp/fixes.b64
           base64 --decode /tmp/fixes.b64 > /tmp/fixes.patch
           echo "e801e3d1c9d402c6af4c42540e6276f999448e8f0047246b312f3764d6d41d05  /tmp/fixes.patch" | sha256sum -c -
-          git apply --check /tmp/fixes.patch
-          git apply /tmp/fixes.patch
+          if git apply --check /tmp/fixes.patch; then
+            git apply /tmp/fixes.patch
+            echo "applied=true" >> "$GITHUB_OUTPUT"
+          elif git apply --reverse --check /tmp/fixes.patch; then
+            echo "applied=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "The staged audit patch does not apply cleanly in either direction." >&2
+            exit 1
+          fi
       - name: Install development toolchain
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
@@ -40,6 +48,7 @@ jobs:
           npm run check:syntax
           npm test
       - name: Commit audited changes
+        if: steps.patch.outputs.applied == 'true'
         shell: bash
         run: |
           git config user.name "ProtonDev-sys"
