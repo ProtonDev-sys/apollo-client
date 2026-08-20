@@ -167,19 +167,21 @@ jobs:
               "--user-data-dir=$userData",
               '--disable-features=Vulkan,WebGPU,WebGPUService'
             ) + $ExtraArguments
-            $process = Start-Process $exe \
-              -ArgumentList $arguments \
-              -RedirectStandardOutput $stdout \
-              -RedirectStandardError $stderr \
-              -PassThru
+            $startParameters = @{
+              FilePath = $exe
+              ArgumentList = $arguments
+              RedirectStandardOutput = $stdout
+              RedirectStandardError = $stderr
+              PassThru = $true
+            }
+            $process = Start-Process @startParameters
             Start-Sleep -Seconds 8
             if ($process.HasExited) {
               Get-Content $stdout -ErrorAction SilentlyContinue
               Get-Content $stderr -ErrorAction SilentlyContinue
               throw "$Name exited before the packaged runtime smoke window completed."
             }
-            Stop-Process -Id $process.Id -Force
-            Wait-Process -Id $process.Id -ErrorAction SilentlyContinue
+            & taskkill.exe /PID $process.Id /T /F | Out-Null
           }
 
           foreach ($entry in $groups.GetEnumerator()) {
