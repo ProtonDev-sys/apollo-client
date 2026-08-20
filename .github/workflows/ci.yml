@@ -63,27 +63,17 @@ jobs:
 
           smoke_path = Path("scripts/electron-ui-smoke.js")
           source = smoke_path.read_text(encoding="utf-8")
-          old = '''  window.webContents.sendInputEvent({
+          start = '''  window.webContents.sendInputEvent({
             type: "keyDown",
             keyCode: "K",
-            modifiers: ["control"]
-          });
-          window.webContents.sendInputEvent({
-            type: "keyUp",
-            keyCode: "K",
-            modifiers: ["control"]
-          });
-          const focusSnapshot = await waitForCondition(
-            window,
-            `Boolean(
-              document.querySelector(".apollo-command-layer")?.classList.contains("is-open")
-              && document.activeElement?.classList.contains("apollo-command-search")
-            )`,
-            5000
-          );
-          assert.equal(Boolean(focusSnapshot), true);
           '''
-          new = '''  const commandShortcutCondition = `Boolean(
+          end = '''  assert.equal(Boolean(focusSnapshot), true);
+          '''
+          if source.count(start) != 1:
+              raise SystemExit("native command-shortcut start boundary was not unique")
+          start_index = source.index(start)
+          end_index = source.index(end, start_index) + len(end)
+          replacement = '''  const commandShortcutCondition = `Boolean(
             document.querySelector(".apollo-command-layer")?.classList.contains("is-open")
             && document.activeElement?.classList.contains("apollo-command-search")
           )`;
@@ -124,9 +114,10 @@ jobs:
           }
           assert.equal(Boolean(focusSnapshot), true);
           '''
-          if source.count(old) != 1:
-              raise SystemExit("native command-shortcut smoke block was not unique")
-          smoke_path.write_text(source.replace(old, new, 1), encoding="utf-8")
+          smoke_path.write_text(
+              source[:start_index] + replacement + source[end_index:],
+              encoding="utf-8",
+          )
           PY
       - name: Install dependencies
         run: npm ci --ignore-scripts
