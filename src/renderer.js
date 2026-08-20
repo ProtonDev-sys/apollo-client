@@ -59,6 +59,25 @@ import {
   formatDuration as formatDurationValue,
   providerLabel as formatProviderLabel
 } from "./renderer/formatters.js";
+import {
+  areTracksEquivalent,
+  buildTrackKey,
+  buildTrackMetadataSnapshot,
+  getTrackNormalizedDuration,
+  getTrackNormalizedText,
+  hasMatchingNormalizedMetadata,
+  hasMatchingProviderIds,
+  isGenericAlbumName,
+  isTrackLikelyPlayable,
+  normaliseMetadataText,
+  normaliseProviderIds,
+  normaliseTrackArtists,
+  normaliseTrackExplicitFlag,
+  normaliseTrackNumberTag,
+  normaliseTrackReleaseDate,
+  PROVIDER_ID_KEYS
+} from "./renderer/track-model.js";
+import { createPollingController } from "./renderer/polling-controller.js";
 const desktopDiscordDefaults = window.apolloDesktop?.discordPresenceDefaults || {};
 let desktopAppConfig = window.apolloDesktop?.appConfig || {};
 const desktopRuntimeAssets = window.apolloDesktop?.runtimeAssets || null;
@@ -81,9 +100,7 @@ const LISTEN_ALONG_HOST_WARNING = "Listen Along currently creates a broker-assis
 const SEARCH_HISTORY_GROUP_WINDOW_MS = 1500;
 const NAVIGATION_INPUT_DEDUPE_MS = 400;
 const LIBRARY_REFRESH_FOCUS_COOLDOWN_MS = 30 * 1000;
-const PROVIDER_ID_KEYS = ["spotify", "youtube", "soundcloud", "itunes", "deezer", "isrc"];
 const APOLLO_SHAREABLE_PROVIDER_ID_KEYS = ["spotify", "deezer", "youtube", "itunes"];
-const GENERIC_ALBUM_NAMES = new Set(["", "singles", "youtube", "soundcloud", "spotify", "deezer"]);
 const AUTOPLAY_RECOMMENDATION_POOL_SIZE = 18;
 const AUTOPLAY_QUEUE_APPEND_COUNT = 8;
 const AUTOPLAY_RECENT_HISTORY_SIZE = 4;
@@ -129,8 +146,6 @@ const listenAlongState = {
   joinedTrackId: "",
   joinedPeerBaseUrl: "",
   joinedPeerCandidates: [],
-  pollHandle: 0,
-  pollInFlight: false
 };
 let listenAlongAutomaticExposureConsent = false;
 let hasPromptedListenAlongAutomaticExposure = false;
@@ -151,6 +166,17 @@ const listenAlongRtc = {
   pendingJoinTimeoutHandle: 0,
   signalingSubscribedRooms: new Set()
 };
+const joinedListenAlongPolling = createPollingController({
+  intervalMs: DISCORD_LISTEN_SESSION_POLL_MS,
+  task: ({ isCurrent }) => refreshJoinedListenAlongSession({ isCurrent }),
+  setIntervalFn: (callback, intervalMs) => window.setInterval(callback, intervalMs),
+  clearIntervalFn: (handle) => window.clearInterval(handle),
+  onError: (error) => {
+    logClient("listen-along", "fallback polling failed", {
+      error: error?.message || "unknown"
+    });
+  }
+});
 
 function createPlaylistModalState(overrides = {}) {
   return {
@@ -1453,150 +1479,6 @@ async function signOut() {
   });
 }
 
-function buildTrackKey(prefix, id) {
-  return `${prefix}:${id}`;
-}
-
-function normaliseProviderIds(providerIds = {}) {
-  const nextProviderIds = {};
-
-  PROVIDER_ID_KEYS.forEach((key) => {
-    const value = providerIds?.[key];
-    nextProviderIds[key] = typeof value === "string" ? value.trim() : value ? String(value) : "";
-  });
-
-  return nextProviderIds;
-}
-
-function normaliseMetadataText(value) {
-  return String(value || "")
-    .trim()
-    .toLowerCase();
-}
-
-function normaliseTrackArtists(artists, fallbackArtist = "") {
-  const fallback = String(fallbackArtist || "").trim();
-  if (Array.isArray(artists)) {
-    const nextArtists = artists
-      .map((artist) => String(artist || "").trim())
-      .filter(Boolean);
-    return nextArtists.length ? nextArtists : (fallback ? [fallback] : []);
-  }
-
-  const trimmedArtists = String(artists || "").trim();
-  if (!trimmedArtists) {
-    return fallback ? [fallback] : [];
-  }
-
-  const nextArtists = trimmedArtists
-    .split(/\s*,\s*/)
-    .map((artist) => artist.trim())
-    .filter(Boolean);
-  return nextArtists.length ? nextArtists : [trimmedArtists];
-}
-
-function normaliseTrackNumberTag(value) {
-  if (value === null || value === undefined || value === "") {
-    return null;
-  }
-
-  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
-    return Math.trunc(value);
-  }
-
-  const match = String(value).match(/(\d{1,4})/);
-  if (!match) {
-    return null;
-  }
-
-  const parsed = Number.parseInt(match[1], 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-}
-
-function normaliseTrackReleaseDate(value) {
-  const trimmed = String(value || "").trim();
-  if (!trimmed) {
-    return "";
-  }
-
-  const fullDate = trimmed.match(/^(\d{4})[-/](\d{2})[-/](\d{2})$/);
-  if (fullDate) {
-    return `${fullDate[1]}-${fullDate[2]}-${fullDate[3]}`;
-  }
-
-  const monthDate = trimmed.match(/^(\d{4})[-/](\d{2})$/);
-  if (monthDate) {
-    return `${monthDate[1]}-${monthDate[2]}`;
-  }
-
-  const yearOnly = trimmed.match(/^(\d{4})$/);
-  if (yearOnly) {
-    return yearOnly[1];
-  }
-
-  const isoLike = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})T/);
-  if (isoLike) {
-    return `${isoLike[1]}-${isoLike[2]}-${isoLike[3]}`;
-  }
-
-  return "";
-}
-
-function normaliseTrackExplicitFlag(value) {
-  if (typeof value === "boolean") {
-    return value;
-  }
-
-  const comparable = normaliseMetadataText(value);
-  if (!comparable) {
-    return null;
-  }
-
-  if (["true", "yes", "1", "explicit"].includes(comparable)) {
-    return true;
-  }
-
-  if (["false", "no", "0", "clean"].includes(comparable)) {
-    return false;
-  }
-
-  return null;
-}
-
-function buildTrackMetadataSnapshot(track = {}) {
-  const artist = String(track.artist || "").trim();
-  const releaseDate = normaliseTrackReleaseDate(track.releaseDate || track.releaseYear || "");
-  const releaseYearMatch = releaseDate.match(/^(\d{4})/);
-  const explicit = normaliseTrackExplicitFlag(track.explicit);
-  const sourcePlatform = String(track.sourcePlatform || track.provider || "").trim();
-
-  return {
-    artists: normaliseTrackArtists(track.artists, artist),
-    albumArtist: String(track.albumArtist || "").trim() || artist,
-    trackNumber: normaliseTrackNumberTag(track.trackNumber),
-    discNumber: normaliseTrackNumberTag(track.discNumber),
-    releaseDate,
-    releaseYear: normaliseTrackNumberTag(track.releaseYear)
-      || (releaseYearMatch ? Number.parseInt(releaseYearMatch[1], 10) : null),
-    genre: Array.isArray(track.genre)
-      ? track.genre.map((value) => String(value || "").trim()).filter(Boolean).join(", ")
-      : String(track.genre || "").trim(),
-    explicit,
-    sourcePlatform,
-    sourceUrl: String(track.sourceUrl || "").trim(),
-    isrc: String(track.isrc || track.providerIds?.isrc || "").trim()
-  };
-}
-
-function getTrackNormalizedDuration(track) {
-  const value = Number(track?.normalizedDuration ?? track?.duration ?? 0);
-  return Number.isFinite(value) && value > 0 ? value : 0;
-}
-
-function getTrackNormalizedText(track, normalizedKey, fallbackKey) {
-  return normaliseMetadataText(track?.[normalizedKey] || track?.[fallbackKey] || "");
-}
-
 function buildSearchCacheKey(query, options = {}) {
   return JSON.stringify({
     query: String(query || "").trim().toLowerCase(),
@@ -2049,40 +1931,6 @@ function handleNavigationMouseButton(event) {
   event.preventDefault();
   event.stopPropagation();
   requestHistoryNavigation(event.button === 3 ? -1 : 1);
-}
-
-function hasMatchingProviderIds(leftTrack, rightTrack) {
-  const leftProviderIds = normaliseProviderIds(leftTrack?.providerIds);
-  const rightProviderIds = normaliseProviderIds(rightTrack?.providerIds);
-
-  return PROVIDER_ID_KEYS.some((key) => {
-    const leftValue = normaliseMetadataText(leftProviderIds[key]);
-    const rightValue = normaliseMetadataText(rightProviderIds[key]);
-    return Boolean(leftValue && rightValue && leftValue === rightValue);
-  });
-}
-
-function hasMatchingNormalizedMetadata(leftTrack, rightTrack) {
-  const leftTitle = getTrackNormalizedText(leftTrack, "normalizedTitle", "title");
-  const rightTitle = getTrackNormalizedText(rightTrack, "normalizedTitle", "title");
-  const leftArtist = getTrackNormalizedText(leftTrack, "normalizedArtist", "artist");
-  const rightArtist = getTrackNormalizedText(rightTrack, "normalizedArtist", "artist");
-
-  if (!leftTitle || !rightTitle || !leftArtist || !rightArtist) {
-    return false;
-  }
-
-  if (leftTitle !== rightTitle || leftArtist !== rightArtist) {
-    return false;
-  }
-
-  const leftDuration = getTrackNormalizedDuration(leftTrack);
-  const rightDuration = getTrackNormalizedDuration(rightTrack);
-  if (leftDuration && rightDuration && Math.abs(leftDuration - rightDuration) > 3) {
-    return false;
-  }
-
-  return true;
 }
 
 function findLibraryMatch(track) {
@@ -3088,20 +2936,6 @@ function commitQueueState({ message = "", renderApp = true } = {}) {
 
   renderDetailPanel();
   renderStatus();
-}
-
-function areTracksEquivalent(leftTrack, rightTrack) {
-  if (!leftTrack || !rightTrack) {
-    return false;
-  }
-
-  return leftTrack.key === rightTrack.key
-    || hasMatchingProviderIds(leftTrack, rightTrack)
-    || hasMatchingNormalizedMetadata(leftTrack, rightTrack);
-}
-
-function isGenericAlbumName(value) {
-  return GENERIC_ALBUM_NAMES.has(normaliseMetadataText(value));
 }
 
 function dedupeEquivalentTracks(tracks = []) {
@@ -4442,26 +4276,6 @@ function getCachedPlaybackUrl(trackKey) {
   }
 
   return wrapPlaybackUrlThroughApollo(entry.url);
-}
-
-function isTrackLikelyPlayable(track) {
-  if (!track?.key) {
-    return false;
-  }
-
-  if (track.playable === false) {
-    return false;
-  }
-
-  if (track.provider === "library" || track.trackId) {
-    return true;
-  }
-
-  if (String(track.playbackUrl || track.externalUrl || track.downloadTarget || "").trim()) {
-    return true;
-  }
-
-  return false;
 }
 
 function getTrackPlaybackFailure(trackOrKey) {
@@ -6095,12 +5909,13 @@ function startListenAlongSnapshotInterval() {
 }
 
 function getListenAlongCaptureStream() {
-  if (typeof audioPlayer.captureStream === "function") {
-    return audioPlayer.captureStream();
+  const sourceElement = getActiveAudioElement();
+  if (typeof sourceElement?.captureStream === "function") {
+    return sourceElement.captureStream();
   }
 
-  if (typeof audioPlayer.mozCaptureStream === "function") {
-    return audioPlayer.mozCaptureStream();
+  if (typeof sourceElement?.mozCaptureStream === "function") {
+    return sourceElement.mozCaptureStream();
   }
 
   throw new Error("This build cannot capture playback audio for listen along.");
@@ -6265,6 +6080,7 @@ function setupListenAlongJoinDataChannel(channel) {
   };
   channel.onopen = () => {
     clearListenAlongJoinTimeout();
+    joinedListenAlongPolling.stop();
   };
   channel.onclose = () => {
     listenAlongRtc.joinDataChannel = null;
@@ -6687,6 +6503,7 @@ async function ensureListenAlongInviteLink(track = getPlaybackTrack()) {
 }
 
 function stopJoinedListenAlongSession() {
+  joinedListenAlongPolling.stop();
   void resetJoinedListenAlongPeer({
     keepRoom: false
   });
@@ -6695,7 +6512,6 @@ function stopJoinedListenAlongSession() {
   listenAlongState.joinedTrackId = "";
   listenAlongState.joinedPeerBaseUrl = "";
   listenAlongState.joinedPeerCandidates = [];
-  listenAlongState.pollInFlight = false;
   listenAlongRtc.joinPeerId = "";
 }
 
@@ -6704,6 +6520,7 @@ async function leaveJoinedListenAlongSession() {
     return false;
   }
 
+  joinedListenAlongPolling.stop();
   await resetJoinedListenAlongPeer({
     keepRoom: false
   });
@@ -7046,13 +6863,18 @@ function createListenAlongTrack(session, sessionId = "") {
   });
 }
 
-async function applyListenAlongSessionSnapshot(session, { initial = false, sessionId = "" } = {}) {
+async function applyListenAlongSessionSnapshot(
+  session,
+  { initial = false, sessionId = "", isCurrent = () => true } = {}
+) {
+  const resolvedSessionId = String(sessionId || listenAlongState.joinedSessionId || "").trim();
+  const canApply = () => isJoinedListenAlongRefreshCurrent(resolvedSessionId, isCurrent);
   const sessionTrackId = String(session?.trackId || "").trim();
-  if (!sessionTrackId) {
+  if (!sessionTrackId || !canApply()) {
     return false;
   }
 
-  const track = createListenAlongTrack(session, sessionId);
+  const track = createListenAlongTrack(session, resolvedSessionId);
   const currentTrack = getPlaybackTrack();
   const currentTrackId = getListenAlongComparableTrackId(currentTrack);
   const needsTrackChange = currentTrackId !== sessionTrackId;
@@ -7062,9 +6884,13 @@ async function applyListenAlongSessionSnapshot(session, { initial = false, sessi
       queueTracks: [track],
       preserveListenAlong: true
     });
-    if (!didStartPlayback) {
+    if (!didStartPlayback || !canApply()) {
       return false;
     }
+  }
+
+  if (!canApply()) {
+    return false;
   }
 
   const playback = {
@@ -7073,11 +6899,18 @@ async function applyListenAlongSessionSnapshot(session, { initial = false, sessi
     capturedAt: Math.max(0, Number(session.capturedAt) || 0),
     playbackRate: clampNumber(session.playbackRate, 0.25, 4, 1)
   };
-  const duration = audioPlayer.duration || getCachedDuration(track) || Number(session.durationSeconds) || Number.MAX_SAFE_INTEGER;
+  const duration = audioPlayer.duration
+    || getCachedDuration(track)
+    || Number(session.durationSeconds)
+    || Number.MAX_SAFE_INTEGER;
   const targetTime = clampNumber(getListenAlongStartTime(playback), 0, duration, 0);
   const driftSeconds = Math.abs((audioPlayer.currentTime || 0) - targetTime);
   if (needsTrackChange || driftSeconds > DISCORD_LISTEN_SESSION_RESYNC_THRESHOLD_SECONDS) {
     audioPlayer.currentTime = targetTime;
+  }
+
+  if (!canApply()) {
+    return false;
   }
 
   if (playback.status === "playing") {
@@ -7086,8 +6919,16 @@ async function applyListenAlongSessionSnapshot(session, { initial = false, sessi
     } catch {
       // Ignore autoplay/promise failures and keep the joined session active.
     }
+
+    if (!canApply()) {
+      return false;
+    }
   } else {
     audioPlayer.pause();
+  }
+
+  if (!canApply()) {
+    return false;
   }
 
   listenAlongState.joinedTrackId = sessionTrackId;
@@ -7102,54 +6943,78 @@ async function applyListenAlongSessionSnapshot(session, { initial = false, sessi
   return true;
 }
 
-async function refreshJoinedListenAlongSession() {
-  if (!listenAlongState.joinedSessionId || listenAlongState.pollInFlight) {
-    return;
+function isJoinedListenAlongRefreshCurrent(sessionId, isCurrent = () => true) {
+  return Boolean(
+    sessionId
+    && typeof isCurrent === "function"
+    && isCurrent()
+    && listenAlongState.joinedSessionId === sessionId
+    && listenAlongRtc.joinDataChannel?.readyState !== "open"
+  );
+}
+
+async function refreshJoinedListenAlongSession({ isCurrent = () => true } = {}) {
+  const sessionId = String(listenAlongState.joinedSessionId || "").trim();
+  const sessionToken = String(listenAlongState.joinedSessionToken || "").trim();
+  const peerCandidates = Array.isArray(listenAlongState.joinedPeerCandidates)
+    ? [...listenAlongState.joinedPeerCandidates]
+    : [];
+  const preferredPeerBaseUrl = String(listenAlongState.joinedPeerBaseUrl || "").trim();
+  const refreshIsCurrent = () => isJoinedListenAlongRefreshCurrent(sessionId, isCurrent);
+
+  if (!refreshIsCurrent()) {
+    return false;
   }
 
-  listenAlongState.pollInFlight = true;
-
   try {
-    const { session, peerBaseUrl } = await fetchListenAlongSession(listenAlongState.joinedSessionId, {
-      sessionToken: listenAlongState.joinedSessionToken,
-      peerCandidates: listenAlongState.joinedPeerCandidates,
-      preferredPeerBaseUrl: listenAlongState.joinedPeerBaseUrl
+    const { session, peerBaseUrl } = await fetchListenAlongSession(sessionId, {
+      sessionToken,
+      peerCandidates,
+      preferredPeerBaseUrl
     });
+
+    if (!refreshIsCurrent()) {
+      return false;
+    }
+
     if (peerBaseUrl) {
       listenAlongState.joinedPeerBaseUrl = peerBaseUrl;
     }
 
     if (!session?.trackId) {
       stopJoinedListenAlongSession();
-      return;
+      return false;
     }
 
-    await applyListenAlongSessionSnapshot(session, {
-      sessionId: listenAlongState.joinedSessionId
+    return applyListenAlongSessionSnapshot(session, {
+      sessionId,
+      isCurrent
     });
   } catch (error) {
+    if (!refreshIsCurrent()) {
+      return false;
+    }
+
     if (/404/i.test(String(error?.message || ""))) {
       stopJoinedListenAlongSession();
       state.message = "The listen along session ended.";
       renderStatus();
-    } else if (!listenAlongState.joinedPeerBaseUrl && !listenAlongState.joinedPeerCandidates.length) {
+    } else if (!preferredPeerBaseUrl && !peerCandidates.length) {
       state.message = "This listen along link is missing peer connection details.";
       renderStatus();
     }
-  } finally {
-    listenAlongState.pollInFlight = false;
+
+    return false;
   }
 }
 
 function startJoinedListenAlongPolling(sessionId, { sessionToken = "", peerCandidates = [], peerBaseUrl = "" } = {}) {
-  stopJoinedListenAlongSession();
+  joinedListenAlongPolling.stop();
   listenAlongState.joinedSessionId = sessionId;
   listenAlongState.joinedSessionToken = sessionToken;
   listenAlongState.joinedPeerBaseUrl = peerBaseUrl;
   listenAlongState.joinedPeerCandidates = [...peerCandidates];
-  listenAlongState.pollHandle = window.setInterval(() => {
-    void refreshJoinedListenAlongSession();
-  }, DISCORD_LISTEN_SESSION_POLL_MS);
+  joinedListenAlongPolling.start();
 }
 
 async function joinApolloListenAlong(track, playback, { sessionId = "", sessionToken = "", peerCandidates = [] } = {}) {
@@ -7185,6 +7050,7 @@ async function joinApolloListenAlong(track, playback, { sessionId = "", sessionT
     return;
   }
 
+  joinedListenAlongPolling.stop();
   await resetJoinedListenAlongPeer({
     keepRoom: false
   });
@@ -7197,14 +7063,18 @@ async function joinApolloListenAlong(track, playback, { sessionId = "", sessionT
     type: "join-request",
     senderId: listenAlongRtc.joinPeerId
   });
-  void refreshJoinedListenAlongSession().catch(() => {});
+  void joinedListenAlongPolling.run();
 
   clearListenAlongJoinTimeout();
   listenAlongRtc.pendingJoinTimeoutHandle = window.setTimeout(() => {
     if (!listenAlongRtc.joinDataChannel && listenAlongState.joinedSessionId === sessionId) {
       state.message = "Direct peer connect timed out. Falling back to session sync.";
       renderStatus();
-      void refreshJoinedListenAlongSession().catch(() => {});
+      startJoinedListenAlongPolling(sessionId, {
+        sessionToken,
+        peerCandidates,
+        peerBaseUrl: listenAlongState.joinedPeerBaseUrl
+      });
     }
   }, 15000);
 }
