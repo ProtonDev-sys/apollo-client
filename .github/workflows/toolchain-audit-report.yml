@@ -1,4 +1,4 @@
-name: Toolchain audit report
+name: Upgrade audited toolchain
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 jobs:
-  audit:
+  upgrade:
     runs-on: ubuntu-latest
     steps:
       - name: Check out branch
@@ -21,61 +21,22 @@ jobs:
         with:
           node-version: 22.x
           cache: npm
-      - name: Install complete dependency tree
-        run: npm ci
-      - name: Capture complete audit report
-        shell: bash
-        run: npm audit --json > toolchain-audit.json || true
-      - name: Build compact audit summary
-        shell: bash
-        run: |
-          node <<'NODE'
-          const fs = require('node:fs');
-          const report = JSON.parse(fs.readFileSync('toolchain-audit.json', 'utf8'));
-          const vulnerabilities = Object.fromEntries(
-            Object.entries(report.vulnerabilities || {}).map(([name, item]) => [
-              name,
-              {
-                severity: item.severity,
-                isDirect: item.isDirect,
-                range: item.range,
-                fixAvailable: item.fixAvailable,
-                effects: item.effects,
-                nodes: item.nodes,
-                via: (item.via || []).map((entry) => {
-                  if (typeof entry === 'string') {
-                    return entry;
-                  }
-
-                  return {
-                    name: entry.name,
-                    title: entry.title,
-                    severity: entry.severity,
-                    range: entry.range,
-                    url: entry.url
-                  };
-                })
-              }
-            ])
-          );
-
-          fs.writeFileSync(
-            'toolchain-audit-summary.json',
-            `${JSON.stringify({ metadata: report.metadata, vulnerabilities }, null, 2)}\n`
-          );
-          NODE
-      - name: Commit audit report
+      - name: Upgrade direct Electron toolchain dependencies
+        run: npm install --save-dev --package-lock-only electron@43.4.1 electron-builder@latest
+      - name: Refresh patched transitive dependencies
+        run: npm audit fix --package-lock-only
+      - name: Verify complete dependency audit
+        run: npm audit
+      - name: Commit audited dependency tree
         shell: bash
         run: |
-          if git diff --quiet -- toolchain-audit.json toolchain-audit-summary.json \
-            && git ls-files --error-unmatch toolchain-audit.json >/dev/null 2>&1 \
-            && git ls-files --error-unmatch toolchain-audit-summary.json >/dev/null 2>&1; then
-            echo "Audit report is unchanged."
+          if git diff --quiet -- package.json package-lock.json; then
+            echo "Dependency tree already contains the audited resolutions."
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add toolchain-audit.json toolchain-audit-summary.json
-          git commit -m "Capture complete toolchain audit"
+          git add package.json package-lock.json
+          git commit -m "Upgrade the Electron build toolchain"
           git push origin HEAD:codex/toolchain-audit-20260820
