@@ -63,16 +63,15 @@ jobs:
 
           smoke_path = Path("scripts/electron-ui-smoke.js")
           source = smoke_path.read_text(encoding="utf-8")
-          start = '''  window.webContents.sendInputEvent({
-            type: "keyDown",
-            keyCode: "K",
-          '''
-          end = '''  assert.equal(Boolean(focusSnapshot), true);
-          '''
-          if source.count(start) != 1:
-              raise SystemExit("native command-shortcut start boundary was not unique")
-          start_index = source.index(start)
-          end_index = source.index(end, start_index) + len(end)
+          key_marker = '    keyCode: "K",'
+          end_marker = '  assert.equal(Boolean(focusSnapshot), true);\n'
+          if source.count(key_marker) != 1:
+              raise SystemExit("native command-shortcut key marker was not unique")
+          key_index = source.index(key_marker)
+          start_index = source.rfind('  window.webContents.sendInputEvent({', 0, key_index)
+          if start_index < 0:
+              raise SystemExit("native command-shortcut start boundary was not found")
+          end_index = source.index(end_marker, key_index) + len(end_marker)
           replacement = '''  const commandShortcutCondition = `Boolean(
             document.querySelector(".apollo-command-layer")?.classList.contains("is-open")
             && document.activeElement?.classList.contains("apollo-command-search")
