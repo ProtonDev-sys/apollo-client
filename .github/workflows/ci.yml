@@ -1,144 +1,161 @@
-name: Apply Electron-only compact runtime
+name: CI
 
 on:
+  push:
+    branches:
+      - main
   pull_request:
 
 permissions:
   contents: read
 
 jobs:
-  apply-electron-only-runtime:
-    name: Apply, validate, and commit compact Electron runtime
-    if: github.head_ref == 'codex/electron-only-minimal-20260820' && github.actor != 'github-actions[bot]'
+  verify:
+    name: Verify on Node.js ${{ matrix.node-version }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version:
+          - 22.x
+          - 24.x
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
     steps:
-      - name: Check out feature branch
+      - name: Check out repository
         uses: actions/checkout@v6
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
         with:
-          ref: codex/electron-only-minimal-20260820
-          fetch-depth: 0
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - name: Install development toolchain
+        run: npm ci
+      - name: Verify Electron runtime, budgets, syntax, tests, and generated bundle
+        run: npm run verify
+      - name: Audit the complete dependency tree
+        run: npm run audit:all
+
+  ui-smoke:
+    name: Native Electron UI smoke
+    runs-on: ubuntu-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+      ELECTRON_DISABLE_SECURITY_WARNINGS: "true"
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
           node-version: 24.x
           cache: npm
-      - name: Apply compact Electron runtime
-        shell: bash
-        run: |
-          node scripts/apply-electron-only-compact.mjs
-          python3 - <<'PY'
-          import json
-          from pathlib import Path
-
-          preload_path = Path("preload.js")
-          preload = preload_path.read_text(encoding="utf-8")
-          if "appRootPath: __dirname" not in preload:
-              marker = "const runtimeAssets = createRuntimeAssetsService({"
-              start = preload.index(marker)
-              end = preload.index("});", start)
-              block = preload[start:end]
-              block = block.replace(
-                  "  runtimeInfo,\n",
-                  "  runtimeInfo,\n  appRootPath: __dirname,\n",
-                  1,
-              )
-              preload = preload[:start] + block + preload[end:]
-              preload_path.write_text(preload, encoding="utf-8")
-
-          runtime_assets_path = Path("src/preload/runtime-assets.js")
-          runtime_assets = runtime_assets_path.read_text(encoding="utf-8")
-          header_start = runtime_assets.index("function createRuntimeAssetsService({")
-          header_end = runtime_assets.index("}) {", header_start)
-          header = runtime_assets[header_start:header_end]
-          if "appRootPath" not in header:
-              header = header.replace(
-                  "  runtimeInfo,\n",
-                  "  runtimeInfo,\n  appRootPath,\n",
-                  1,
-              )
-              runtime_assets = runtime_assets[:header_start] + header + runtime_assets[header_end:]
-              runtime_assets_path.write_text(runtime_assets, encoding="utf-8")
-
-          manifest_script = '''#!/usr/bin/env node
-
-          const fs = require("node:fs");
-          const path = require("node:path");
-
-          const projectRoot = path.resolve(__dirname, "..");
-          const sourcePackage = JSON.parse(
-            fs.readFileSync(path.join(projectRoot, "package.json"), "utf8")
-          );
-          const outputDirectory = path.join(projectRoot, "dist-app");
-          const runtimeManifest = {
-            name: sourcePackage.name,
-            version: sourcePackage.version,
-            description: sourcePackage.description,
-            main: "main.js",
-            author: sourcePackage.author,
-            license: sourcePackage.license,
-            private: true
-          };
-
-          fs.mkdirSync(outputDirectory, { recursive: true });
-          fs.writeFileSync(
-            path.join(outputDirectory, "package.json"),
-            `${JSON.stringify(runtimeManifest)}\n`
-          );
-          '''
-          manifest_path = Path("scripts/write-runtime-manifest.js")
-          manifest_path.write_text(
-              "\n".join(line[10:] if line.startswith("          ") else line for line in manifest_script.splitlines()) + "\n",
-              encoding="utf-8",
-          )
-
-          package_path = Path("package.json")
-          package_json = json.loads(package_path.read_text(encoding="utf-8"))
-          package_json["scripts"]["build:app"] = (
-              "node scripts/build-app.js && node scripts/write-runtime-manifest.js"
-          )
-          package_path.write_text(json.dumps(package_json, indent=2) + "\n", encoding="utf-8")
-
-          gitignore_path = Path(".gitignore")
-          gitignore = gitignore_path.read_text(encoding="utf-8")
-          if "test-results/" not in gitignore.splitlines():
-              gitignore = gitignore.rstrip() + "\ntest-results/\n"
-              gitignore_path.write_text(gitignore, encoding="utf-8")
-          PY
-      - name: Refresh dependency lock
-        run: npm install --package-lock-only --ignore-scripts
-      - name: Install build dependencies without downloading Electron
+      - name: Install development toolchain
         run: npm ci
-      - name: Validate source, tests, dependency audits, and generated runtime
-        run: |
-          npm run verify
-          npm run audit:all
-          git diff --check
-      - name: Install the Electron binary for native smoke and packaging
+      - name: Install the Electron binary
         run: env -u ELECTRON_SKIP_BINARY_DOWNLOAD npm rebuild electron
-      - name: Exercise the native Electron interface
-        env:
-          ELECTRON_DISABLE_SECURITY_WARNINGS: "true"
-          LIBGL_ALWAYS_SOFTWARE: "1"
+      - name: Exercise the desktop interface
         run: xvfb-run --auto-servernum --server-args="-screen 0 1440x900x24" npm run test:ui
-      - name: Build and verify unpacked Linux package
+      - name: Upload rendered interface
+        uses: actions/upload-artifact@v7
+        with:
+          name: apollo-client-ui-smoke
+          path: test-results/apollo-client-ui.png
+          if-no-files-found: error
+          retention-days: 7
+
+  linux-package:
+    name: Compact Linux package
+    runs-on: ubuntu-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          cache: npm
+      - name: Install development toolchain
+        run: npm ci
+      - name: Install the Electron binary
+        run: env -u ELECTRON_SKIP_BINARY_DOWNLOAD npm rebuild electron
+      - name: Build and validate the unpacked application
+        shell: bash
         run: |
           mkdir -p native-bin
           npm run pack:linux:ci
           npm run check:package
-      - name: Commit validated permanent files
+      - name: Report package sizes
         shell: bash
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          rm -f scripts/.electron-compact-transform.mjs
-          git rm -f scripts/apply-electron-only-compact.mjs
-          git rm -rf scripts/.electron-compact-payload
-          git checkout HEAD -- .github/workflows/ci.yml
-          rm -rf dist-app release test-results
-          git add -A
-          git commit -m "Make Apollo a compact dependency-free Electron app"
-          git push origin HEAD:codex/electron-only-minimal-20260820
+          asar_bytes=$(stat -c%s release/linux-unpacked/resources/app.asar)
+          unpacked_bytes=$(du -sb release/linux-unpacked | cut -f1)
+          printf 'app.asar: %s bytes\nLinux unpacked directory: %s bytes\n' "$asar_bytes" "$unpacked_bytes"
+          {
+            echo '### Linux package size'
+            echo
+            echo "- app.asar: ${asar_bytes} bytes"
+            echo "- unpacked directory: ${unpacked_bytes} bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload compact ASAR
+        uses: actions/upload-artifact@v7
+        with:
+          name: apollo-client-linux-asar
+          path: release/linux-unpacked/resources/app.asar
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-package:
+    name: Compact Windows installer
+    runs-on: windows-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          cache: npm
+      - name: Install development toolchain
+        run: npm ci
+      - name: Install the Electron binary
+        shell: pwsh
+        run: |
+          Remove-Item Env:ELECTRON_SKIP_BINARY_DOWNLOAD -ErrorAction SilentlyContinue
+          npm rebuild electron
+      - name: Build the English-only installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force native-bin | Out-Null
+          npm run build:app
+          npx electron-builder --win nsis --publish never
+      - name: Enforce and report installer size
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem release -Filter 'Apollo-Client-Setup-*.exe' | Select-Object -First 1
+          if (-not $installer) {
+            throw 'Windows installer was not generated.'
+          }
+          $maxBytes = 125829120
+          if ($installer.Length -gt $maxBytes) {
+            throw "Windows installer exceeds the $maxBytes-byte budget: $($installer.Length) bytes."
+          }
+          "Windows installer: $($installer.Length) bytes"
+          @(
+            '### Windows package size',
+            '',
+            "- installer: $($installer.Length) bytes",
+            "- budget: $maxBytes bytes"
+          ) | Add-Content $env:GITHUB_STEP_SUMMARY
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: apollo-client-windows-installer
+          path: release/Apollo-Client-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 7
