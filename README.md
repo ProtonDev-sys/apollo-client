@@ -66,7 +66,10 @@ Current measured outputs are:
 | Windows `app.asar` | 387,165 bytes |
 | Linux x64 unpacked runtime | 273,060,493 bytes |
 | Windows x64 unpacked runtime | 292,748,743 bytes |
-| Windows x64 installer | 94,838,255 bytes |
+| Windows x64 installer | 94,838,251 bytes |
+| Windows x64 portable 7-Zip archive | 76,758,470 bytes |
+
+The portable archive is 18,079,781 bytes smaller than the installer and 27,119,737 bytes smaller than the original 103,878,207-byte installer. It contains the same pruned Electron application but must be extracted before launch.
 
 ```sh
 npm run build:app
@@ -114,22 +117,36 @@ The log is capped at 1 MiB and its in-memory queue is bounded.
 
 Rich Presence uses Apollo's built-in Discord application ID unless it is overridden in settings or with the documented `APOLLO_DISCORD_*` environment variables. The client talks to the local Discord desktop IPC endpoint through a small built-in Node module, so the packaged application has no production package dependencies.
 
-The optional Windows Discord Social helper remains lazy. It is started only when an account action requires it.
+The optional Windows Discord Social helper remains lazy and is excluded from normal installers and portable archives. It is built only by the explicit Social SDK package target.
 
-## Building Windows packages
+## Building Windows distributions
 
-Windows packaging requires Visual Studio Build Tools with the C++ workload and a local Discord Social SDK checkout when the optional native helper is required.
+Build the compact core installer without the optional Discord Social SDK:
 
 ```powershell
-$env:APOLLO_DISCORD_SOCIAL_SDK_DIR = "C:\path\to\discord_social_sdk"
 npm run build:win
 ```
 
-The command builds the helper into `native-bin/`, generates the compact Electron runtime, and writes the NSIS installer to `release/`.
+Build the smaller portable 7-Zip archive:
+
+```powershell
+npm run build:win:portable
+```
+
+The portable build creates the pruned `win-unpacked` application and compresses it as a solid LZMA2 archive with a 78,000,000-byte release ceiling. It does not install shortcuts or registry entries.
+
+Build an installer that includes the optional Discord Social helper only when the local SDK and Visual Studio C++ tools are available:
+
+```powershell
+$env:APOLLO_DISCORD_SOCIAL_SDK_DIR = "C:\path\to\discord_social_sdk"
+npm run build:win:social
+```
+
+Core packages remain independent of the Discord Social SDK. Native helper output is generated under `native-bin/` and is never committed.
 
 ## Validation
 
-`npm run verify` checks the Electron-only project boundary, source budgets, syntax, unit tests, generated runtime bundle, and production dependency audit. CI repeats this on Node.js 22 and 24, exercises both the development and pruned packaged Electron applications, builds Linux and Windows packages, and enforces ASAR, unpacked-runtime, and installer-size limits.
+`npm run verify` checks the Electron-only project boundary, source budgets, syntax, unit tests, generated runtime bundle, and production dependency audit. CI repeats this on Node.js 22 and 24, exercises both the development and pruned packaged Electron applications, builds Linux and Windows packages, extracts and launches the portable archive, and enforces ASAR, unpacked-runtime, installer, and portable-archive size limits.
 
 ## Project layout
 
