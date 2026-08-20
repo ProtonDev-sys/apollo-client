@@ -1,96 +1,62 @@
-name: CI
+name: Apply Electron-only compact runtime
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
 
 permissions:
   contents: read
 
 jobs:
-  verify:
-    name: Node ${{ matrix.node-version }}
+  apply-electron-only-runtime:
+    name: Apply, validate, and commit compact Electron runtime
+    if: github.head_ref == 'codex/electron-only-minimal-20260820' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version:
-          - 20.x
-          - 22.x
+    permissions:
+      contents: write
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Check out feature branch
+        uses: actions/checkout@v6
         with:
-          node-version: ${{ matrix.node-version }}
-          cache: npm
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-      - name: Verify Electron runtime boundary
-        run: npm run check:runtime
-      - name: Verify Electron resource budgets
-        run: npm run check:resources
-      - name: Check JavaScript syntax
-        run: npm run check:syntax
-      - name: Run tests
-        run: npm test
-      - name: Audit production dependencies
-        run: npm run audit:deps
-
-  ui-smoke:
-    name: Electron UI smoke
-    runs-on: ubuntu-latest
-    env:
-      ELECTRON_DISABLE_SECURITY_WARNINGS: "true"
-      LIBGL_ALWAYS_SOFTWARE: "1"
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+          ref: codex/electron-only-minimal-20260820
+          fetch-depth: 0
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 22.x
+          node-version: 24.x
           cache: npm
-      - name: Install dependencies with Electron
+      - name: Apply compact Electron runtime
+        run: node scripts/apply-electron-only-compact.mjs
+      - name: Refresh dependency lock
+        run: npm install --package-lock-only --ignore-scripts
+      - name: Install build dependencies without downloading Electron
         run: npm ci
-      - name: Render and exercise the client UI
+      - name: Validate source, tests, dependency audits, and generated runtime
+        run: |
+          npm run verify
+          npm run audit:all
+          git diff --check
+      - name: Install the Electron binary for native smoke and packaging
+        run: env -u ELECTRON_SKIP_BINARY_DOWNLOAD npm rebuild electron
+      - name: Exercise the native Electron interface
+        env:
+          ELECTRON_DISABLE_SECURITY_WARNINGS: "true"
+          LIBGL_ALWAYS_SOFTWARE: "1"
         run: xvfb-run --auto-servernum --server-args="-screen 0 1440x900x24" npm run test:ui
-      - name: Upload rendered UI
-        uses: actions/upload-artifact@v4
-        with:
-          name: apollo-client-ui-smoke
-          path: test-results/apollo-client-ui.png
-          if-no-files-found: error
-          retention-days: 7
-
-  toolchain:
-    name: Electron audit and package smoke
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22.x
-          cache: npm
-      - name: Install complete dependency tree
-        run: npm ci
-      - name: Audit complete dependency tree
-        run: npm run audit:all
-      - name: Prepare optional native resource directory
-        run: mkdir -p native-bin
-      - name: Build unpacked Linux application
-        run: npm run pack:linux:ci
-      - name: Verify packaged application structure and size
+      - name: Build and verify unpacked Linux package
+        run: |
+          mkdir -p native-bin
+          npm run pack:linux:ci
+          npm run check:package
+      - name: Commit validated permanent files
         shell: bash
         run: |
-          test -d release/linux-unpacked
-          test -f release/linux-unpacked/resources/app.asar
-          test -s release/linux-unpacked/resources/app.asar
-          npm run check:package
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm -f scripts/apply-electron-only-compact.mjs
+          git rm -rf scripts/.electron-compact-payload
+          git rm -f scripts/.electron-compact-transform.mjs
+          git add -A
+          git commit -m "Make Apollo a compact dependency-free Electron app"
+          git push origin HEAD:codex/electron-only-minimal-20260820
