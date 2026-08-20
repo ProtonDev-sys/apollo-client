@@ -1,7 +1,6 @@
 const fs = require("node:fs");
 const path = require("node:path");
 const { pathToFileURL } = require("node:url");
-const mqtt = require("mqtt");
 const { contextBridge, ipcRenderer } = require("electron");
 const { createEventChannel, createStateStore } = require("./src/preload/state-store");
 const {
@@ -34,6 +33,7 @@ const listenAlongStateStore = createStateStore({
 });
 let pendingDeepLinkUrl = "";
 let pendingClientUpdateInfo = null;
+let nativeMqttAdapter = null;
 
 const runtimeInfo = (() => {
   try {
@@ -64,8 +64,19 @@ const runtimeAssets = createRuntimeAssetsService({
   appRootPath: __dirname,
   logEvent: logRendererEvent
 });
+const lazyNativeMqtt = {
+  connect(url, options) {
+    if (!nativeMqttAdapter) {
+      const { createMqttWebSocketAdapter } = require("./src/preload/mqtt-websocket");
+      nativeMqttAdapter = createMqttWebSocketAdapter({
+        WebSocketImpl: globalThis.WebSocket
+      });
+    }
+    return nativeMqttAdapter.connect(url, options);
+  }
+};
 const listenAlongSignaling = createListenAlongSignaling({
-  mqtt,
+  mqtt: lazyNativeMqtt,
   brokerUrl: DEFAULT_LISTEN_ALONG_SIGNAL_BROKER_URL
 });
 
