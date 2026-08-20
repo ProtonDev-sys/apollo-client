@@ -138,7 +138,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm scripts/apply-coderabbit-resource-fixes.py
+          git rm -f scripts/apply-coderabbit-resource-fixes.py
           git add \
             scripts/check-package-budget.js \
             scripts/check-resource-budget.js \
