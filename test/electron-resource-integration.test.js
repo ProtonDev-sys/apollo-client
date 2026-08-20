@@ -38,7 +38,9 @@ test("renderer bounds caches, history, prefetch, and high-frequency playback wor
   assert.match(source, /PLAYBACK_PREFETCH_LIMIT = 3/);
   assert.match(source, /NAVIGATION_HISTORY_MAX_ENTRIES = 16/);
   assert.match(source, /playbackUiUpdateGate\.shouldRun\(\)/);
-  assert.match(source, /playbackStatePersistenceGate\.shouldRun/);
+  assert.match(source, /function persistPlaybackState\(\{ throttled = false, force = false \}/);
+  assert.match(source, /throttled && !playbackStatePersistenceGate\.shouldRun/);
+  assert.match(source, /persistPlaybackState\(\{ throttled: true \}\)/);
   assert.match(source, /slice\(0, PLAYBACK_PREFETCH_LIMIT\)/);
   assert.match(source, /setLruMapValue\(artistTracksCache/);
   assert.match(source, /persistPlaybackState\(\{ force: true \}\)/);

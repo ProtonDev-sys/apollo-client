@@ -5,7 +5,9 @@ const MQTT_PROTOCOL_LEVEL = 4;
 const DEFAULT_KEEP_ALIVE_SECONDS = 30;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 const DEFAULT_RECONNECT_PERIOD_MS = 3_000;
-const DEFAULT_MAX_PACKET_BYTES = 1024 * 1024;
+const DEFAULT_ACK_TIMEOUT_MS = 10_000;
+const DEFAULT_MAX_PENDING_ACKS = 64;
+const DEFAULT_MAX_PACKET_BYTES = 256 * 1024;
 
 function encodeRemainingLength(value) {
   let remaining = Math.max(0, Number(value) || 0);
@@ -150,6 +152,11 @@ class MqttWebSocketClient extends EventEmitter {
       connectTimeout: resolveNumberOption(options.connectTimeout, DEFAULT_CONNECT_TIMEOUT_MS, 1),
       reconnectPeriod: resolveNumberOption(options.reconnectPeriod, DEFAULT_RECONNECT_PERIOD_MS),
       keepalive: resolveNumberOption(options.keepalive, DEFAULT_KEEP_ALIVE_SECONDS),
+      ackTimeout: resolveNumberOption(options.ackTimeout, DEFAULT_ACK_TIMEOUT_MS, 1),
+      maxPendingAcks: Math.max(
+        1,
+        Math.trunc(resolveNumberOption(options.maxPendingAcks, DEFAULT_MAX_PENDING_ACKS, 1))
+      ),
       maxPacketBytes: resolveNumberOption(options.maxPacketBytes, DEFAULT_MAX_PACKET_BYTES, 1024)
     };
     this.WebSocketImpl = options.WebSocketImpl || globalThis.WebSocket;
@@ -177,9 +184,15 @@ class MqttWebSocketClient extends EventEmitter {
   }
 
   allocatePacketId() {
-    const packetId = this.nextPacketId;
-    this.nextPacketId = packetId >= 0xffff ? 1 : packetId + 1;
-    return packetId;
+    for (let attempt = 0; attempt < 0xffff; attempt += 1) {
+      const packetId = this.nextPacketId;
+      this.nextPacketId = packetId >= 0xffff ? 1 : packetId + 1;
+      if (!this.pendingAcks.has(packetId)) {
+        return packetId;
+      }
+    }
+
+    throw new Error("MQTT acknowledgement queue is exhausted.");
   }
 
   clearTimer(name) {
@@ -378,27 +391,53 @@ class MqttWebSocketClient extends EventEmitter {
         throw new Error("Malformed MQTT acknowledgement packet.");
       }
       const packetId = body.readUInt16BE(0);
-      const pending = this.pendingAcks.get(packetId);
-      if (pending) {
-        this.pendingAcks.delete(packetId);
-        const grants = packetType === 9 ? body.subarray(2) : undefined;
-        const error = grants?.includes(0x80)
-          ? new Error("MQTT broker rejected the subscription.")
-          : null;
-        pending.callback(error, grants);
-      }
+      const grants = packetType === 9 ? body.subarray(2) : undefined;
+      const error = grants?.includes(0x80)
+        ? new Error("MQTT broker rejected the subscription.")
+        : null;
+      this.settlePendingAck(packetId, error, grants);
     }
   }
 
-  rejectPendingAcks(error) {
-    for (const pending of this.pendingAcks.values()) {
-      try {
-        pending.callback(error);
-      } catch {
-        // Ignore callback failures during teardown.
-      }
+  settlePendingAck(packetId, error = null, grants = undefined) {
+    const pending = this.pendingAcks.get(packetId);
+    if (!pending) {
+      return false;
     }
-    this.pendingAcks.clear();
+
+    this.pendingAcks.delete(packetId);
+    clearTimeout(pending.timeoutHandle);
+    try {
+      pending.callback(error, grants);
+    } catch {
+      // A consumer callback must not tear down the signaling connection.
+    }
+    return true;
+  }
+
+  registerPendingAck(packetId, callback) {
+    while (this.pendingAcks.size >= this.options.maxPendingAcks) {
+      const oldestPacketId = this.pendingAcks.keys().next().value;
+      this.settlePendingAck(
+        oldestPacketId,
+        new Error("MQTT acknowledgement queue limit reached.")
+      );
+    }
+
+    const timeoutHandle = setTimeout(() => {
+      this.settlePendingAck(packetId, new Error("MQTT acknowledgement timed out."));
+    }, this.options.ackTimeout);
+    timeoutHandle.unref?.();
+    this.pendingAcks.set(packetId, {
+      callback: callback || (() => {}),
+      timeoutHandle
+    });
+  }
+
+  rejectPendingAcks(error) {
+    for (const packetId of [...this.pendingAcks.keys()]) {
+      this.settlePendingAck(packetId, error);
+    }
   }
 
   sendPacket(packet) {
@@ -427,8 +466,8 @@ class MqttWebSocketClient extends EventEmitter {
         packetIdBuffer,
         ...topicList.flatMap((topic) => [encodeUtf8String(topic), Buffer.from([0])])
       ]);
-      this.pendingAcks.set(packetId, { callback: resolvedCallback || (() => {}) });
       this.sendPacket(createPacket(0x82, body));
+      this.registerPendingAck(packetId, resolvedCallback);
     } catch (error) {
       resolvedCallback?.(error);
       if (!resolvedCallback) {
@@ -451,11 +490,11 @@ class MqttWebSocketClient extends EventEmitter {
       const packetId = this.allocatePacketId();
       const packetIdBuffer = Buffer.allocUnsafe(2);
       packetIdBuffer.writeUInt16BE(packetId, 0);
-      this.pendingAcks.set(packetId, { callback: callback || (() => {}) });
       this.sendPacket(createPacket(0xa2, Buffer.concat([
         packetIdBuffer,
         ...topicList.map(encodeUtf8String)
       ])));
+      this.registerPendingAck(packetId, callback);
     } catch (error) {
       callback?.(error);
       if (!callback) {
@@ -515,7 +554,9 @@ function createMqttWebSocketAdapter({ WebSocketImpl = globalThis.WebSocket } = {
 }
 
 module.exports = {
+  DEFAULT_ACK_TIMEOUT_MS,
   DEFAULT_MAX_PACKET_BYTES,
+  DEFAULT_MAX_PENDING_ACKS,
   MqttWebSocketClient,
   createMqttWebSocketAdapter,
   createConnectPacket,

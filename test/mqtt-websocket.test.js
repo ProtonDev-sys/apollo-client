@@ -30,6 +30,9 @@ class FakeWebSocket {
   }
 
   send(packet) {
+    if (this.failSend) {
+      throw new Error("socket send failed");
+    }
     this.sent.push(Buffer.from(packet));
   }
 
@@ -141,5 +144,36 @@ test("native adapter closes oversized streams without retaining data", async () 
   socket.message(Buffer.from([0x30, 0xff, 0xff, 0x7f]));
   assert.match((await error).message, /size limit/);
   assert.equal(socket.readyState, 3);
+  client.end(true);
+});
+
+
+test("native adapter does not retain acknowledgements when a send fails", async () => {
+  const { client, socket } = connectClient();
+  socket.failSend = true;
+  const error = await new Promise((resolve) => {
+    client.subscribe("apollo/fail", (failure) => resolve(failure));
+  });
+  assert.match(error.message, /send failed/);
+  assert.equal(client.pendingAcks.size, 0);
+  socket.failSend = false;
+  client.end(true);
+});
+
+test("native adapter bounds acknowledgement memory and expires missing acknowledgements", async () => {
+  const { client } = connectClient({
+    ackTimeout: 15,
+    maxPendingAcks: 2
+  });
+  const failures = [];
+  client.subscribe("apollo/one", (error) => error && failures.push(error.message));
+  client.subscribe("apollo/two", (error) => error && failures.push(error.message));
+  client.subscribe("apollo/three", (error) => error && failures.push(error.message));
+
+  assert.equal(client.pendingAcks.size, 2);
+  assert.ok(failures.some((message) => /queue limit/.test(message)));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(client.pendingAcks.size, 0);
+  assert.equal(failures.filter((message) => /timed out/.test(message)).length, 2);
   client.end(true);
 });

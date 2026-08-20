@@ -889,8 +889,8 @@ function persistSettings() {
   persistStoredSettings(localStorage, state.settings);
 }
 
-function persistPlaybackState({ force = false } = {}) {
-  if (!playbackStatePersistenceGate.shouldRun({ force })) {
+function persistPlaybackState({ throttled = false, force = false } = {}) {
+  if (throttled && !playbackStatePersistenceGate.shouldRun({ force })) {
     return;
   }
 
@@ -1942,8 +1942,8 @@ async function requestHistoryNavigation(direction) {
     return;
   }
 
-    navigationBackStack.push(structuredClone(currentNavigationSnapshot));
-    trimOldestArrayEntries(navigationBackStack, NAVIGATION_HISTORY_MAX_ENTRIES);
+  navigationBackStack.push(structuredClone(currentNavigationSnapshot));
+  trimOldestArrayEntries(navigationBackStack, NAVIGATION_HISTORY_MAX_ENTRIES);
   const nextSnapshot = navigationForwardStack.pop();
   renderNavigationButtons();
   await applyNavigationSnapshot(nextSnapshot);
@@ -11101,7 +11101,7 @@ function bindPlaybackElementEvents(element) {
         threshold: 4
       });
     }
-    persistPlaybackState();
+    persistPlaybackState({ throttled: true });
   });
 
   element.addEventListener("seeked", (event) => {
