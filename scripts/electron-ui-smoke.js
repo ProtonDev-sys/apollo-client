@@ -183,41 +183,43 @@ async function run() {
   assert.equal(densitySnapshot.compact, true);
   assert.match(String(densitySnapshot.storedPreferences || ""), /compact/);
 
-  const keyboardSnapshot = await window.webContents.executeJavaScript(`
-    (() => {
-      document.dispatchEvent(new KeyboardEvent("keydown", {
-        key: "Escape",
-        bubbles: true,
-        cancelable: true
-      }));
-      const closed = !document.querySelector(".apollo-command-layer")?.classList.contains("is-open");
+  window.focus();
+  window.webContents.focus();
+  await waitForCondition(window, "document.hasFocus()", 5000);
 
-      document.dispatchEvent(new KeyboardEvent("keydown", {
-        key: "k",
-        ctrlKey: true,
-        bubbles: true,
-        cancelable: true
-      }));
-      const reopened = document.querySelector(".apollo-command-layer")?.classList.contains("is-open") || false;
-      const searchFocused = document.activeElement?.classList.contains("apollo-command-search") || false;
-
-      return {
-        closed,
-        reopened,
-        searchFocused
-      };
-    })()
-  `, true);
-
-  assert.equal(keyboardSnapshot.closed, true);
-  assert.equal(keyboardSnapshot.reopened, true);
-
-  const focusSnapshot = await waitForCondition(
+  window.webContents.sendInputEvent({
+    type: "keyDown",
+    keyCode: "Escape"
+  });
+  window.webContents.sendInputEvent({
+    type: "keyUp",
+    keyCode: "Escape"
+  });
+  await waitForCondition(
     window,
-    `document.activeElement?.classList.contains("apollo-command-search") || false`,
+    `!document.querySelector(".apollo-command-layer")?.classList.contains("is-open")`,
     5000
   );
-  assert.equal(Boolean(keyboardSnapshot.searchFocused || focusSnapshot), true);
+
+  window.webContents.sendInputEvent({
+    type: "keyDown",
+    keyCode: "K",
+    modifiers: ["control"]
+  });
+  window.webContents.sendInputEvent({
+    type: "keyUp",
+    keyCode: "K",
+    modifiers: ["control"]
+  });
+  const focusSnapshot = await waitForCondition(
+    window,
+    `Boolean(
+      document.querySelector(".apollo-command-layer")?.classList.contains("is-open")
+      && document.activeElement?.classList.contains("apollo-command-search")
+    )`,
+    5000
+  );
+  assert.equal(Boolean(focusSnapshot), true);
 
   fs.mkdirSync(OUTPUT_DIRECTORY, {
     recursive: true
