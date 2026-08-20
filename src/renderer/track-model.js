@@ -206,8 +206,14 @@ export function getTrackNormalizedText(track, normalizedKey, fallbackKey) {
 }
 
 export function hasMatchingProviderIds(leftTrack, rightTrack) {
-  const leftProviderIds = normaliseProviderIds(leftTrack?.providerIds);
-  const rightProviderIds = normaliseProviderIds(rightTrack?.providerIds);
+  const leftProviderIds = normaliseProviderIds({
+    ...(leftTrack?.providerIds || {}),
+    isrc: leftTrack?.isrc || leftTrack?.providerIds?.isrc || ""
+  });
+  const rightProviderIds = normaliseProviderIds({
+    ...(rightTrack?.providerIds || {}),
+    isrc: rightTrack?.isrc || rightTrack?.providerIds?.isrc || ""
+  });
 
   return PROVIDER_ID_KEYS.some((key) => {
     const leftValue = normaliseMetadataText(leftProviderIds[key]);
