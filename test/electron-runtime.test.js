@@ -29,6 +29,7 @@ function createProject(overrides = {}) {
       asar: true,
       compression: "maximum",
       npmRebuild: false,
+      afterPack: "scripts/prune-electron-runtime.js",
       electronLanguages: ["en-US"],
       files: [{ from: "dist-app", to: ".", filter: ["**/*"] }]
     },
@@ -54,6 +55,10 @@ function createProject(overrides = {}) {
   fs.writeFileSync(path.join(projectRoot, "src", "index.html"), "<!doctype html><title>Apollo</title>\n");
   fs.writeFileSync(path.join(projectRoot, "src", "renderer.js"), "export const runtime = 'electron';\n");
   fs.writeFileSync(path.join(projectRoot, "scripts", "build-app.js"), "module.exports = {};\n");
+  fs.writeFileSync(
+    path.join(projectRoot, "scripts", "prune-electron-runtime.js"),
+    "module.exports = async function afterPack() {};\n"
+  );
 
   if (overrides.retiredReference) {
     fs.writeFileSync(
@@ -128,9 +133,24 @@ test("Electron-only boundary rejects mixed toolchains and broad packaging", (con
   assert.match(errors, /toolchain allowlist/);
   assert.match(errors, /ASAR/);
   assert.match(errors, /compression/);
+  assert.match(errors, /prune-electron-runtime/);
   assert.match(errors, /generated dist-app/);
   assert.match(errors, /en-US locale/);
   assert.match(errors, /Retired desktop-shell reference/);
+});
+
+test("Electron-only boundary rejects a missing runtime pruning hook", (context) => {
+  const projectRoot = createProject();
+  context.after(() => fs.rmSync(projectRoot, { recursive: true, force: true }));
+  const packagePath = path.join(projectRoot, "package.json");
+  const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+  delete packageJson.build.afterPack;
+  fs.writeFileSync(packagePath, JSON.stringify(packageJson));
+
+  assert.match(
+    collectElectronRuntimeErrors(projectRoot).join("\n"),
+    /prune-electron-runtime/
+  );
 });
 
 test("retired desktop references are detected across documentation and source", (context) => {
