@@ -144,7 +144,7 @@ export function createDefaultSettings({
         soundcloud: true,
         itunes: true
       },
-      liveSearchDelayMs: 220
+      liveSearchDelayMs: 160
     },
     downloads: {
       autoRefreshLibrary: true,

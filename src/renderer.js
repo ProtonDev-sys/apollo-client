@@ -78,6 +78,12 @@ import {
   PROVIDER_ID_KEYS
 } from "./renderer/track-model.js";
 import { createPollingController } from "./renderer/polling-controller.js";
+import {
+  buildSearchCacheKey as buildClientSearchCacheKey,
+  createTimedLruCache,
+  createTrackSearchIndex,
+  mergeSearchTracks
+} from "./renderer/search-index.js";
 const desktopDiscordDefaults = window.apolloDesktop?.discordPresenceDefaults || {};
 let desktopAppConfig = window.apolloDesktop?.appConfig || {};
 const desktopRuntimeAssets = window.apolloDesktop?.runtimeAssets || null;
@@ -345,7 +351,11 @@ const renderRevisions = {
 const durationCache = loadPersistedDurationCache();
 const playbackUrlCache = new Map();
 const pendingPlaybackUrlCache = new Map();
-const searchResultCache = new Map();
+const searchResultCache = createTimedLruCache({
+  maxEntries: 40,
+  ttlMs: 2 * 60 * 1000
+});
+const trackSearchIndex = createTrackSearchIndex();
 const artistSearchCache = new Map();
 const artistProfileCache = new Map();
 const artistTracksCache = new Map();
@@ -1316,6 +1326,7 @@ function clearApolloData() {
   state.playbackAutoplayQueue = [];
   state.playbackCurrentSource = "standalone";
   searchResultCache.clear();
+  trackSearchIndex.clear();
   artistSearchCache.clear();
   artistProfileCache.clear();
   artistTracksCache.clear();
@@ -1480,36 +1491,22 @@ async function signOut() {
 }
 
 function buildSearchCacheKey(query, options = {}) {
-  return JSON.stringify({
-    query: String(query || "").trim().toLowerCase(),
-    scope: String(options.scope || "all"),
-    provider: Array.isArray(options.providers)
-      ? options.providers.join(",")
-      : String(options.provider || ""),
-    includeLibraryResults: Boolean(state.settings.search.includeLibraryResults),
-    providers: getEnabledProviders(),
+  return buildClientSearchCacheKey({
+    query,
+    scope: options.scope || "all",
+    provider: options.provider || "",
+    providers: Array.isArray(options.providers) ? options.providers : getEnabledProviders(),
+    includeLibraryResults: state.settings.search.includeLibraryResults,
     apiBase: state.apiBase
   });
 }
 
 function readCachedSearchResult(query, options = {}) {
-  const cacheKey = buildSearchCacheKey(query, options);
-  const cached = searchResultCache.get(cacheKey);
-  return cached ? structuredClone(cached) : null;
+  return searchResultCache.get(buildSearchCacheKey(query, options));
 }
 
 function writeCachedSearchResult(query, result, options = {}) {
-  const cacheKey = buildSearchCacheKey(query, options);
-  searchResultCache.set(cacheKey, structuredClone(result));
-
-  if (searchResultCache.size <= 20) {
-    return;
-  }
-
-  const oldestKey = searchResultCache.keys().next().value;
-  if (oldestKey) {
-    searchResultCache.delete(oldestKey);
-  }
+  searchResultCache.set(buildSearchCacheKey(query, options), result);
 }
 
 function normaliseArtist(artist = {}) {
@@ -2284,41 +2281,76 @@ async function fetchSearchResults(query) {
   return result;
 }
 
-async function fetchRemoteSearchResults(query, { signal } = {}) {
+async function fetchRemoteSearchResults(query, {
+  signal,
+  onProgress = () => {}
+} = {}) {
   const trimmedQuery = String(query || "").trim();
   const enabledProviders = getEnabledProviders();
   if (!trimmedQuery || !enabledProviders.length) {
     return {
       tracks: [],
-      warnings: []
+      warnings: [],
+      progress: null
     };
   }
 
   const useAllProviders = enabledProviders.length === searchProviderOrder.length;
   const remoteProviderParam = useAllProviders ? "all" : enabledProviders.join(",");
-  const cachedResult = readCachedSearchResult(trimmedQuery, {
+  const cacheOptions = {
     scope: "remote",
     provider: remoteProviderParam,
     providers: enabledProviders
-  });
+  };
+  const cachedResult = readCachedSearchResult(trimmedQuery, cacheOptions);
   if (cachedResult) {
+    onProgress({
+      ...cachedResult,
+      complete: true,
+      fromCache: true
+    });
     return cachedResult;
   }
 
-  const payload = await requestJson(
-    buildSearchRequestPath(trimmedQuery, "remote", remoteProviderParam),
-    createSearchRequestOptions({ signal })
-  );
-  const result = {
-    tracks: dedupeTracks((payload.remote?.items || []).map(normaliseRemoteTrack)),
-    warnings: [payload.remote?.warning].filter(Boolean)
+  let latestResult = {
+    tracks: [],
+    warnings: [],
+    progress: null
   };
-  writeCachedSearchResult(trimmedQuery, result, {
-    scope: "remote",
-    provider: remoteProviderParam,
-    providers: enabledProviders
-  });
-  return result;
+  let receivedEvent = false;
+  const streamPath = `${buildSearchRequestPath(trimmedQuery, "remote", remoteProviderParam)}&stream=1`;
+
+  await requestJson.requestEventStream(
+    streamPath,
+    createSearchRequestOptions({ signal }),
+    ({ event, data }) => {
+      if (!data || !["message", "snapshot", "done"].includes(event)) {
+        return;
+      }
+
+      const remotePayload = data.remote || {};
+      const progress = remotePayload.progress || null;
+      const complete = event === "done" || progress?.complete === true;
+      latestResult = {
+        tracks: dedupeTracks((remotePayload.items || []).map(normaliseRemoteTrack)),
+        warnings: [remotePayload.warning].filter(Boolean),
+        progress
+      };
+      receivedEvent = true;
+      onProgress({
+        ...latestResult,
+        complete,
+        fromCache: false
+      });
+    }
+  );
+
+  if (!receivedEvent) {
+    return latestResult;
+  }
+
+  writeCachedSearchResult(trimmedQuery, latestResult, cacheOptions);
+  return latestResult;
 }
 
 async function fetchArtistSearchResults(query, { signal } = {}) {
@@ -2396,31 +2428,6 @@ async function fetchArtistReleases(artistId, { signal } = {}) {
   return releases;
 }
 
-async function enrichArtistSearchResults(artists, { signal } = {}) {
-  return Promise.all(
-    (Array.isArray(artists) ? artists : []).map(async (artist) => {
-      try {
-        const [profile, releases] = await Promise.all([
-          fetchArtistProfile(artist.id, { signal }),
-          fetchArtistReleases(artist.id, { signal })
-        ]);
-        return normaliseArtist({
-          ...artist,
-          ...profile,
-          artwork: getArtistArtwork(profile),
-          releases
-        });
-      } catch (error) {
-        if (isAbortError(error)) {
-          throw error;
-        }
-
-        return normaliseArtist(artist);
-      }
-    })
-  );
-}
-
 function abortPendingSearchRequest() {
   activeSearchAbortController?.abort();
   activeSearchAbortController = null;
@@ -2438,19 +2445,6 @@ function isAbortError(error) {
 function isSearchRequestCurrent(requestId, query) {
   return requestId === activeSearchRequestId
     && query === String(state.query || "").trim();
-}
-
-function matchesTrackQuery(track, query) {
-  const normalizedQuery = normaliseMetadataText(query);
-  if (!normalizedQuery) {
-    return true;
-  }
-
-  return [
-    getTrackNormalizedText(track, "normalizedTitle", "title"),
-    getTrackNormalizedText(track, "normalizedArtist", "artist"),
-    getTrackNormalizedText(track, "normalizedAlbum", "album")
-  ].some((value) => value.includes(normalizedQuery));
 }
 
 function getLocalSearchResults(query) {
@@ -2471,7 +2465,7 @@ function getLocalSearchResults(query) {
     return state.libraryTracks;
   })();
 
-  return baseTracks.filter((track) => matchesTrackQuery(track, trimmedQuery));
+  return trackSearchIndex.search(baseTracks, trimmedQuery);
 }
 
 function isCollectionScopedSearch() {
@@ -7706,6 +7700,7 @@ async function refreshLibrary({ force = false, reason = "manual" } = {}) {
     }));
     bumpRenderRevisions("library", "playlists");
     searchResultCache.clear();
+    trackSearchIndex.clear();
     state.message = health?.status ? "" : "Apollo responded without a health status.";
 
     if (!state.query) {
@@ -7880,7 +7875,9 @@ async function runSearch({ historySource = "", historyReplace = false } = {}) {
       return;
     }
 
-    state.searchResults = dedupeTracks([...localTracks, ...remoteResults]);
+    state.searchResults = mergeSearchTracks(localTracks, remoteResults, {
+      isEquivalent: areTracksEquivalent
+    });
     state.artistSearchResults = artistResults;
     bumpRenderRevisions("search");
     state.message = collectionScopedSearch
@@ -7948,16 +7945,6 @@ async function runSearch({ historySource = "", historyReplace = false } = {}) {
 
         artistResults = artists;
         publishSearchProgress();
-        return enrichArtistSearchResults(artists, { signal: abortController.signal })
-          .then((enrichedArtists) => {
-            if (!isSearchRequestCurrent(requestId, query)) {
-              return;
-            }
-
-            artistResults = enrichedArtists;
-            writeCachedArtistSearchResult(query, enrichedArtists);
-            publishSearchProgress();
-          });
       })
       .catch((error) => {
         if (!isAbortError(error)) {
@@ -7965,14 +7952,34 @@ async function runSearch({ historySource = "", historyReplace = false } = {}) {
         }
       });
 
-    const remoteTask = fetchRemoteSearchResults(query, { signal: abortController.signal })
+    const remoteTask = fetchRemoteSearchResults(query, {
+      signal: abortController.signal,
+      onProgress({ tracks, warnings, complete }) {
+        if (!isSearchRequestCurrent(requestId, query)) {
+          return;
+        }
+
+        remoteResults = tracks;
+        searchWarnings.splice(
+          0,
+          searchWarnings.length,
+          ...Array.from(new Set(warnings.filter(Boolean)))
+        );
+        remotePending = !complete;
+        publishSearchProgress();
+      }
+    })
       .then(({ tracks, warnings }) => {
         if (!isSearchRequestCurrent(requestId, query)) {
           return;
         }
 
         remoteResults = tracks;
-        searchWarnings.splice(0, searchWarnings.length, ...warnings);
+        searchWarnings.splice(
+          0,
+          searchWarnings.length,
+          ...Array.from(new Set(warnings.filter(Boolean)))
+        );
         remotePending = false;
         publishSearchProgress();
       })
