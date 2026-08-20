@@ -28,13 +28,19 @@ test("Discord presence uses the local native IPC implementation", () => {
   assert.match(read("src/main/discord-ipc.js"), /node:net/);
 });
 
-test("main process defers optional work and uses asynchronous logging", () => {
+test("main process defers optional work and disables unused Chromium graphics features", () => {
   const source = read("main.js");
 
   assert.match(source, /createAsyncLogWriter/);
   assert.match(source, /function ensureDiscordSocialBridge\(\)/);
   assert.match(source, /backgroundThrottling: true/);
   assert.match(source, /spellcheck: false/);
+  assert.match(source, /DISABLED_CHROMIUM_FEATURES/);
+  assert.match(source, /"Vulkan"/);
+  assert.match(source, /"WebGPU"/);
+  assert.match(source, /"WebGPUService"/);
+  assert.match(source, /configureLeanChromiumRuntime\(\);/);
+  assert.match(source, /appendSwitch\?\.\(\s*"disable-features"/);
   assert.match(source, /!app\.isPackaged \|\| process\.env\.APOLLO_CLIENT_DIAGNOSTICS === "1"/);
   assert.doesNotMatch(source, /fs\.(?:appendFileSync|statSync|writeFileSync)/);
   assert.doesNotMatch(source, /^const \{ createDiscordSocialBridge \} = require/m);
@@ -65,16 +71,23 @@ test("packaged runtime assets avoid watchers, broad scans, and startup seeding",
   assert.doesNotMatch(source, /\n  initialiseWatchers\(\);\n\n  return \{/);
 });
 
-test("production packaging contains only generated Electron runtime files", () => {
+test("production packaging contains only generated and pruned Electron runtime files", () => {
   const packageJson = JSON.parse(read("package.json"));
+  const pruneSource = read("scripts/prune-electron-runtime.js");
 
   assert.equal(packageJson.build.asar, true);
   assert.equal(packageJson.build.compression, "maximum");
   assert.equal(packageJson.build.npmRebuild, false);
+  assert.equal(packageJson.build.afterPack, "scripts/prune-electron-runtime.js");
   assert.deepEqual(packageJson.build.electronLanguages, ["en-US"]);
   assert.deepEqual(packageJson.build.files, [
     { from: "dist-app", to: ".", filter: ["**/*"] }
   ]);
+  assert.match(pruneSource, /dxcompiler\.dll/);
+  assert.match(pruneSource, /dxil\.dll/);
+  assert.match(pruneSource, /vk_swiftshader\.dll/);
+  assert.match(pruneSource, /libvk_swiftshader\.so/);
+  assert.match(pruneSource, /libvulkan\.so\.1/);
   assert.equal(packageJson.devDependencies.electron, "^43.4.1");
   assert.equal(packageJson.devDependencies["electron-builder"], "^26.15.7");
   assert.equal(packageJson.devDependencies.esbuild, "^0.28.2");
