@@ -85,6 +85,13 @@ test("provider ids are normalized and can identify equivalent tracks", async () 
     ),
     true
   );
+  assert.equal(
+    hasMatchingProviderIds(
+      { isrc: " US-AAA-24-00001 " },
+      { isrc: "us-aaa-24-00001" }
+    ),
+    true
+  );
 });
 
 test("metadata equivalence tolerates small duration differences only", async () => {
