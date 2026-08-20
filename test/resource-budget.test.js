@@ -9,17 +9,21 @@ const {
 const {
   checkPackageBudget
 } = require("../scripts/check-package-budget");
+const {
+  checkBundleBudget
+} = require("../scripts/check-bundle-budget");
 
 function createProject(overrides = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "apollo-resource-budget-"));
   fs.mkdirSync(path.join(root, "src"), { recursive: true });
   const packageJson = {
     main: "main.js",
-    dependencies: { "discord-rpc": "^4.0.1" },
+    dependencies: {},
     build: {
       asar: true,
       compression: "maximum",
-      files: ["main.js", "preload.js", "src/**/*", "package.json"]
+      electronLanguages: ["en-US"],
+      files: [{ from: "dist-app", to: ".", filter: ["**/*"] }]
     },
     ...overrides.packageJson
   };
@@ -41,33 +45,39 @@ function createProject(overrides = {}) {
   return root;
 }
 
-test("resource budget accepts a compact Electron project", (context) => {
+test("resource budget accepts a compact dependency-free Electron project", (context) => {
   const root = createProject();
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   assert.deepEqual(collectResourceBudgetErrors(root).errors, []);
 });
 
-test("resource budget rejects MQTT, unrestricted packaging, and dead desktop files", (context) => {
+test("resource budget rejects dependencies, broad packaging, and extra locales", (context) => {
   const root = createProject({
     packageJson: {
-      dependencies: { mqtt: "^5.0.0" },
-      build: { asar: false, compression: "store", files: ["**/*"] }
+      dependencies: { "runtime-package": "1.0.0" },
+      build: {
+        asar: false,
+        compression: "store",
+        electronLanguages: ["en-US", "de"],
+        files: ["**/*"]
+      }
     },
     packageLock: {
       packages: {
-        "": { dependencies: { mqtt: "^5.0.0" } },
-        "node_modules/mqtt": { version: "5.0.0" }
+        "": { dependencies: { "runtime-package": "1.0.0" } }
       }
     }
   });
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.mkdirSync(path.join(root, "src", "desktop"), { recursive: true });
   fs.writeFileSync(path.join(root, "src", "desktop", "runtime-assets.js"), "");
+
   const errors = collectResourceBudgetErrors(root).errors.join("\n");
-  assert.match(errors, /mqtt/i);
+  assert.match(errors, /production dependencies/);
   assert.match(errors, /ASAR/);
   assert.match(errors, /compression/);
-  assert.match(errors, /unrestricted wildcard/);
+  assert.match(errors, /generated dist-app/);
+  assert.match(errors, /en-US locale/);
   assert.match(errors, /src\/desktop\/runtime-assets/);
 });
 
@@ -81,8 +91,7 @@ test("package budget rejects oversized app.asar files", (context) => {
   assert.equal(checkPackageBudget({ projectRoot: root, maxAsarBytes: 30 }).ok, true);
 });
 
-
-test("resource budget rejects unavailable required targets and exact exclusive limits", (context) => {
+test("resource budget rejects unavailable targets and exact exclusive limits", (context) => {
   const root = createProject();
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   fs.rmSync(path.join(root, "preload.js"));
@@ -95,15 +104,13 @@ test("resource budget rejects unavailable required targets and exact exclusive l
   assert.match(errors, /mainBytes exceeds its exclusive resource budget/);
 });
 
-test("package budget rejects non-finite and non-positive limits", (context) => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "apollo-package-budget-"));
-  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+test("package and bundle budgets reject invalid limits", () => {
   assert.throws(
-    () => checkPackageBudget({ projectRoot: root, maxAsarBytes: Number.POSITIVE_INFINITY }),
+    () => checkPackageBudget({ maxAsarBytes: Number.POSITIVE_INFINITY }),
     /finite positive number/
   );
   assert.throws(
-    () => checkPackageBudget({ projectRoot: root, maxAsarBytes: 0 }),
+    () => checkBundleBudget({ maxBundleBytes: 0 }),
     /finite positive number/
   );
 });

@@ -1,9 +1,8 @@
 {
   "theme": {
-    "id": "default-theme",
     "fonts": {
-      "ui": "\"IBM Plex Sans\", sans-serif",
-      "mono": "\"IBM Plex Mono\", monospace"
+      "ui": "system-ui, -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif",
+      "mono": "ui-monospace, \"SFMono-Regular\", Consolas, \"Liberation Mono\", monospace"
     },
     "variables": {
       "bg": "#050505",

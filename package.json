@@ -1,26 +1,28 @@
 {
   "name": "apollo-client",
-  "version": "0.1.5",
-  "description": "Desktop client shell for the Apollo music server.",
+  "version": "0.1.6",
+  "description": "Compact Electron desktop client for the Apollo music server.",
   "main": "main.js",
   "scripts": {
     "preinstall": "node scripts/check-engines.js",
     "start": "electron .",
+    "build:app": "node scripts/build-app.js && node scripts/write-runtime-manifest.js",
     "check:runtime": "node scripts/check-electron-runtime.js",
     "check:resources": "node scripts/check-resource-budget.js",
+    "check:bundle": "node scripts/check-bundle-budget.js",
     "check:package": "node scripts/check-package-budget.js",
     "check:syntax": "node scripts/check-syntax.js",
     "test": "node --test",
     "test:ui": "electron --no-sandbox scripts/electron-ui-smoke.js",
     "audit:deps": "npm audit --omit=dev",
     "audit:all": "npm audit",
-    "verify": "npm run check:runtime && npm run check:resources && npm run check:syntax && npm test && npm run audit:deps",
-    "pack:linux:ci": "electron-builder --dir --linux --publish never",
+    "verify": "npm run check:runtime && npm run check:resources && npm run check:syntax && npm test && npm run build:app && npm run check:bundle && npm run audit:deps",
+    "pack:linux:ci": "npm run build:app && electron-builder --dir --linux --publish never",
     "build:discord-social-helper": "scripts\\build-discord-social-helper.cmd",
-    "build:win": "npm run build:discord-social-helper && electron-builder --win nsis"
+    "build:win": "npm run build:app && npm run build:discord-social-helper && electron-builder --win nsis"
   },
   "engines": {
-    "node": ">=20",
+    "node": ">=22.12.0",
     "npm": ">=10"
   },
   "keywords": [
@@ -36,21 +38,30 @@
     "asar": true,
     "compression": "maximum",
     "npmRebuild": false,
+    "removePackageScripts": true,
+    "removePackageKeywords": true,
+    "electronLanguages": [
+      "en-US"
+    ],
     "directories": {
       "output": "release"
     },
     "files": [
-      "main.js",
-      "preload.js",
-      "discord-presence.js",
-      "discord-social-bridge.js",
-      "src/**/*",
-      "package.json"
+      {
+        "from": "dist-app",
+        "to": ".",
+        "filter": [
+          "**/*"
+        ]
+      }
     ],
     "extraResources": [
       {
         "from": "native-bin",
-        "to": "native-bin"
+        "to": "native-bin",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {
@@ -68,14 +79,15 @@
     "nsis": {
       "oneClick": false,
       "perMachine": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "installerLanguages": [
+        "en_US"
+      ]
     }
   },
   "devDependencies": {
     "electron": "^43.4.1",
-    "electron-builder": "^26.15.3"
-  },
-  "dependencies": {
-    "discord-rpc": "^4.0.1"
+    "electron-builder": "^26.15.7",
+    "esbuild": "^0.28.2"
   }
 }

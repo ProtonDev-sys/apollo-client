@@ -1,7 +1,8 @@
 import interfacePlugin from "../plugins/interface-plugin.js";
+import lyricsPlugin from "../plugins/lyrics-plugin.js";
 
 const appliedThemeVariableNames = new WeakMap();
-const BUILT_IN_PLUGIN_MODULES = [interfacePlugin];
+const BUILT_IN_PLUGIN_MODULES = [interfacePlugin, lyricsPlugin];
 
 function resolveThemeStyleElement(documentRef) {
   return documentRef.querySelector("#apollo-theme-style");
@@ -25,7 +26,6 @@ export function applyConfiguredTheme(theme, documentRef = document) {
       });
     }
 
-    // Theme files can be swapped live, so stale overrides need to be removed explicitly.
     for (const variableName of appliedThemeVariableNames.get(documentRef) || []) {
       if (!nextVariableNames.has(variableName)) {
         rootStyle.removeProperty(variableName);

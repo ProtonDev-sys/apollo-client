@@ -1,6 +1,6 @@
 # Song Search
 
-Apollo Client is an Electron application. Search runs in the Electron renderer and calls the Apollo server through the constrained client transport. The project does not use Tauri, and `npm run check:runtime` rejects Tauri dependencies, project artifacts, and references in executable application files.
+Apollo Client runs as a single Electron desktop application. Search executes in the Electron renderer and calls the Apollo server through the constrained client transport. `npm run check:runtime` enforces the direct Electron entry points, dependency-free production runtime, generated package boundary, and single-locale build.
 
 ## Search stages
 
@@ -48,10 +48,7 @@ General song search does not eagerly request full profiles and releases for ever
 Search changes must pass:
 
 ```sh
-npm run check:runtime
-npm run check:syntax
-npm test
-npm run audit:deps
+npm run verify
 ```
 
-CI additionally runs the complete dependency audit, exercises the Electron interface under Xvfb, and builds an unpacked Electron application with a non-empty `app.asar`.
+CI also exercises the Electron interface under Xvfb and builds an unpacked Electron application with a bounded, non-empty `app.asar`.

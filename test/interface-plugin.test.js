@@ -33,7 +33,8 @@ function copyInterfaceRuntimeSource(temporaryRoot) {
   [
     "interface-plugin.js",
     "interface-state.js",
-    "interface-styles.js"
+    "interface-styles.js",
+    "lyrics-plugin.js"
   ].forEach((fileName) => {
     fs.copyFileSync(
       path.join(__dirname, "..", "src", "plugins", fileName),
@@ -216,7 +217,7 @@ test("interface editable-target detection avoids stealing shortcuts from form co
   );
 });
 
-test("runtime asset loader always includes the built-in interface plugin", async () => {
+test("runtime asset loader always includes the built-in interface and lyrics plugins", async () => {
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "apollo-runtime-assets-"));
 
   try {
@@ -231,7 +232,7 @@ test("runtime asset loader always includes the built-in interface plugin", async
 
     assert.deepEqual(
       loaded.map((plugin) => plugin.id),
-      ["interface"]
+      ["interface", "lyrics"]
     );
   } finally {
     fs.rmSync(temporaryRoot, {
@@ -284,7 +285,7 @@ test("runtime asset loader preserves built-ins and skips a duplicate runtime plu
 
     assert.deepEqual(
       loaded.map((plugin) => plugin.id),
-      ["interface", "extra"]
+      ["interface", "lyrics", "extra"]
     );
     assert.equal(
       logs.some((entry) => entry.message === "duplicate plugin module ignored"),

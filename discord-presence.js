@@ -2,7 +2,7 @@ let cachedDiscordRpc = null;
 
 function loadDiscordRpc() {
   if (!cachedDiscordRpc) {
-    cachedDiscordRpc = require("discord-rpc");
+    cachedDiscordRpc = require("./src/main/discord-ipc");
   }
   return cachedDiscordRpc;
 }
