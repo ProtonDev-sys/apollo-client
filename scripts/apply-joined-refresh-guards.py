@@ -13,6 +13,14 @@ def replace_once(old: str, new: str, label: str) -> None:
     source = source.replace(old, new, 1)
 
 
+def replace_exact_count(old: str, new: str, expected: int, label: str) -> None:
+    global source
+    count = source.count(old)
+    if count != expected:
+        raise SystemExit(f"{label}: expected {expected} matches, found {count}")
+    source = source.replace(old, new)
+
+
 def replace_block(start: str, end: str, replacement: str, label: str) -> None:
     global source
     start_count = source.count(start)
@@ -38,10 +46,11 @@ replace_once(
     "  task: ({ isCurrent }) => refreshJoinedListenAlongSession({ isCurrent }),\n",
     "generation-aware polling task",
 )
-replace_once(
+replace_exact_count(
     "  listenAlongState.pollInFlight = false;\n",
     "",
-    "legacy joined-session inflight reset",
+    2,
+    "legacy joined-session inflight resets",
 )
 replace_once(
     "  void refreshJoinedListenAlongSession().catch(() => {});\n",
