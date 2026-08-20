@@ -13,6 +13,9 @@ const UPNP_SERVICE_TYPES = [
 ];
 const ALLOWED_UPSTREAM_PROTOCOLS = new Set(["http:", "https:"]);
 const PRIVATE_IPV4_PATTERN = /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[0-1])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/;
+const DEFAULT_ENABLE_UPNP = /^(1|true|yes)$/i.test(
+  String(process.env.APOLLO_LISTEN_ALONG_UPNP || "").trim()
+);
 
 function dedupeStrings(values = []) {
   const seen = new Set();
@@ -218,6 +221,8 @@ function sendCorsHeaders(response) {
   response.setHeader("Access-Control-Allow-Origin", "*");
   response.setHeader("Access-Control-Allow-Headers", "Content-Type, Range");
   response.setHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("Referrer-Policy", "no-referrer");
 }
 
 function readToken(requestUrl) {
@@ -292,19 +297,17 @@ function createUpstreamRequest(urlString, headers = {}) {
   });
 }
 
-function createListenAlongServer({ logger = () => {} } = {}) {
+function createListenAlongServer({ logger = () => {}, enableUpnp = DEFAULT_ENABLE_UPNP } = {}) {
   const emitter = new EventEmitter();
   const sessions = new Map();
+  const upnpEnabled = Boolean(enableUpnp);
   let server = null;
   let upnpMapping = null;
-  let serverState = {
-    available: false,
-    running: false,
-    port: 0,
-    advertisedHosts: [],
-    publicHost: "",
-    message: "Listen along server is starting."
-  };
+  let serverState = createServerState(
+    null,
+    true,
+    "Listen along server is idle until a session is shared."
+  );
 
   function log(message) {
     try {
@@ -321,6 +324,7 @@ function createListenAlongServer({ logger = () => {} } = {}) {
   function getState() {
     return {
       ...serverState,
+      upnpEnabled,
       advertisedHosts: [...serverState.advertisedHosts]
     };
   }
@@ -329,6 +333,7 @@ function createListenAlongServer({ logger = () => {} } = {}) {
     sendCorsHeaders(response);
     response.statusCode = statusCode;
     response.setHeader("Content-Type", "application/json; charset=utf-8");
+    response.setHeader("Cache-Control", "no-store");
     response.end(JSON.stringify(payload));
   }
 
@@ -336,6 +341,7 @@ function createListenAlongServer({ logger = () => {} } = {}) {
     sendCorsHeaders(response);
     response.statusCode = statusCode;
     response.setHeader("Content-Type", "text/plain; charset=utf-8");
+    response.setHeader("Cache-Control", "no-store");
     response.end(String(message || ""));
   }
 
@@ -438,6 +444,7 @@ function createListenAlongServer({ logger = () => {} } = {}) {
     if (request.method === "OPTIONS") {
       sendCorsHeaders(response);
       response.statusCode = 204;
+      response.setHeader("Cache-Control", "no-store");
       response.end();
       return;
     }
@@ -445,7 +452,7 @@ function createListenAlongServer({ logger = () => {} } = {}) {
     if (requestUrl.pathname === "/health") {
       writeJson(response, 200, {
         ok: true,
-        state: getState()
+        running: serverState.running
       });
       return;
     }
@@ -477,7 +484,7 @@ function createListenAlongServer({ logger = () => {} } = {}) {
     writeText(response, 404, "Not found.");
   }
 
-  async function start() {
+  async function startServer() {
     if (server) {
       return getState();
     }
@@ -497,11 +504,16 @@ function createListenAlongServer({ logger = () => {} } = {}) {
       });
     });
 
-    try {
-      upnpMapping = await ensureUpnpPortMapping(server.address().port);
-    } catch (error) {
-      log(`upnp unavailable error=${error?.message || "unknown"}`);
+    if (upnpEnabled) {
+      try {
+        upnpMapping = await ensureUpnpPortMapping(server.address().port);
+      } catch (error) {
+        log(`upnp unavailable error=${error?.message || "unknown"}`);
+        upnpMapping = null;
+      }
+    } else {
       upnpMapping = null;
+      log("upnp disabled; set APOLLO_LISTEN_ALONG_UPNP=1 to opt in");
     }
 
     if (upnpMapping?.externalIp && !isRoutableIpv4(upnpMapping.externalIp)) {
@@ -516,12 +528,20 @@ function createListenAlongServer({ logger = () => {} } = {}) {
     return getState();
   }
 
+  async function start() {
+    return getState();
+  }
+
   async function stop() {
     sessions.clear();
     const previousMapping = upnpMapping;
     upnpMapping = null;
     if (!server) {
-      serverState = createServerState(null, false, "Listen along server stopped.");
+      serverState = createServerState(
+        null,
+        true,
+        "Listen along server is idle until a session is shared."
+      );
       emitState();
       return;
     }
@@ -538,13 +558,15 @@ function createListenAlongServer({ logger = () => {} } = {}) {
       await removeUpnpPortMapping(previousMapping).catch(() => {});
     }
 
-    serverState = createServerState(null, false, "Listen along server stopped.");
+    serverState = createServerState(
+      null,
+      true,
+      "Listen along server is idle until a session is shared."
+    );
     emitState();
   }
 
   async function publishSession(payload = {}) {
-    await start();
-
     const sessionId = String(payload.sessionId || "").trim();
     const token = String(payload.token || createToken()).trim();
     const trackId = String(payload.trackId || "").trim();
@@ -553,6 +575,8 @@ function createListenAlongServer({ logger = () => {} } = {}) {
     if (!sessionId || !token || !trackId || !sourceStreamUrl) {
       throw new Error("Listen along publish payload is incomplete.");
     }
+
+    await startServer();
 
     const now = Date.now();
     const nextSession = {
@@ -582,6 +606,11 @@ function createListenAlongServer({ logger = () => {} } = {}) {
 
   function clearSession(sessionId) {
     sessions.delete(String(sessionId || "").trim());
+    if (!sessions.size && server) {
+      void stop().catch((error) => {
+        log(`stop failed error=${error?.message || "unknown"}`);
+      });
+    }
   }
 
   return {
