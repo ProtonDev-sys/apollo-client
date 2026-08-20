@@ -5,7 +5,8 @@ export function createPollingController({
   clearIntervalFn = clearInterval,
   onError = () => {}
 } = {}) {
-  if (!Number.isFinite(Number(intervalMs)) || Number(intervalMs) <= 0) {
+  const resolvedIntervalMs = Number(intervalMs);
+  if (!Number.isFinite(resolvedIntervalMs) || resolvedIntervalMs <= 0) {
     throw new TypeError("Polling interval must be a positive number.");
   }
 
@@ -18,28 +19,52 @@ export function createPollingController({
   }
 
   let intervalHandle = null;
-  let activeTask = null;
+  let activeRun = null;
+  let generation = 0;
+
+  function invalidate() {
+    generation += 1;
+    activeRun = null;
+    return generation;
+  }
 
   function run() {
-    if (activeTask) {
-      return activeTask;
+    if (activeRun) {
+      return activeRun.promise;
     }
 
-    activeTask = Promise.resolve()
-      .then(() => task())
+    const runGeneration = generation;
+    const context = Object.freeze({
+      generation: runGeneration,
+      isCurrent: () => generation === runGeneration
+    });
+    const runRecord = {
+      generation: runGeneration,
+      promise: null
+    };
+
+    runRecord.promise = Promise.resolve()
+      .then(() => task(context))
       .catch((error) => {
+        if (!context.isCurrent()) {
+          return undefined;
+        }
+
         try {
-          onError(error);
+          return Promise.resolve(onError(error, context)).catch(() => undefined);
         } catch {
           // Keep the polling lifecycle alive even if error reporting fails.
+          return undefined;
         }
-        return undefined;
       })
       .finally(() => {
-        activeTask = null;
+        if (activeRun === runRecord) {
+          activeRun = null;
+        }
       });
 
-    return activeTask;
+    activeRun = runRecord;
+    return runRecord.promise;
   }
 
   function stop() {
@@ -47,6 +72,8 @@ export function createPollingController({
       clearIntervalFn(intervalHandle);
       intervalHandle = null;
     }
+
+    invalidate();
   }
 
   function start({ immediate = true } = {}) {
@@ -58,7 +85,7 @@ export function createPollingController({
 
     intervalHandle = setIntervalFn(() => {
       void run();
-    }, Number(intervalMs));
+    }, resolvedIntervalMs);
 
     return intervalHandle;
   }
@@ -67,8 +94,10 @@ export function createPollingController({
     start,
     stop,
     run,
+    invalidate,
     isRunning: () => intervalHandle !== null,
-    isTaskActive: () => activeTask !== null,
+    isTaskActive: () => activeRun !== null,
+    getGeneration: () => generation,
     getHandle: () => intervalHandle
   };
 }
