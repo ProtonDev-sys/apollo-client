@@ -10,47 +10,6 @@ permissions:
   contents: read
 
 jobs:
-  apply-review-fixes:
-    name: Apply reviewed resource fixes
-    if: github.event_name == 'pull_request' && github.head_ref == 'codex/electron-resource-budget-20260820' && github.actor != 'github-actions[bot]'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
-    steps:
-      - name: Check out feature branch
-        uses: actions/checkout@v4
-        with:
-          ref: codex/electron-resource-budget-20260820
-          fetch-depth: 0
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22.x
-          cache: npm
-      - name: Apply persistence and signaling fixes
-        run: python3 scripts/apply-electron-resource-review-fixes.py
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-      - name: Validate reviewed fixes
-        run: |
-          npm run check:runtime
-          npm run check:resources
-          npm run check:syntax
-          npm test
-          npm run audit:deps
-          git diff --check
-      - name: Commit validated application files
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm scripts/apply-electron-resource-review-fixes.py
-          git add src/renderer.js src/preload/mqtt-websocket.js test/mqtt-websocket.test.js test/electron-resource-integration.test.js
-          git commit -m "Bound signaling acknowledgements and preserve immediate state writes"
-          git push origin HEAD:codex/electron-resource-budget-20260820
-
   verify:
     name: Node ${{ matrix.node-version }}
     runs-on: ubuntu-latest
