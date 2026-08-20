@@ -88,23 +88,33 @@ jobs:
           mkdir -p native-bin
           npm run pack:linux:ci
           npm run check:package
-      - name: Exercise the packaged software-rendering path
+      - name: Exercise packaged hardware and software rendering
         shell: bash
         run: |
           set -euo pipefail
           executable=$(find release/linux-unpacked -maxdepth 1 -type f -perm -111 ! -name 'chrome-sandbox' ! -name 'chrome_crashpad_handler' | head -n 1)
           test -n "$executable"
-          xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' bash -c '
-            set -e
-            app="$1"
-            user_data="$2"
-            "$app" --no-sandbox --disable-gpu --user-data-dir="$user_data" >"$user_data.log" 2>&1 &
-            pid=$!
-            sleep 8
-            kill -0 "$pid"
-            kill "$pid" || true
-            wait "$pid" || true
-          ' _ "$executable" "$RUNNER_TEMP/apollo-packaged-user"
+
+          launch_packaged() {
+            local mode="$1"
+            shift
+            local user_data="$RUNNER_TEMP/apollo-packaged-$mode"
+            xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' bash -c '
+              set -e
+              app="$1"
+              user_data="$2"
+              shift 2
+              "$app" --no-sandbox --user-data-dir="$user_data" "$@" >"$user_data.log" 2>&1 &
+              pid=$!
+              sleep 8
+              kill -0 "$pid"
+              kill "$pid" || true
+              wait "$pid" || true
+            ' _ "$executable" "$user_data" "$@"
+          }
+
+          launch_packaged hardware
+          launch_packaged software --disable-gpu
       - name: Report package sizes
         shell: bash
         run: |
@@ -152,20 +162,24 @@ jobs:
           npm run build:app
           npx electron-builder --win nsis --publish never
           npm run check:package
-      - name: Exercise the packaged software-rendering path
+      - name: Exercise packaged hardware and software rendering
         shell: pwsh
         run: |
           $exe = (Resolve-Path 'release/win-unpacked/Apollo Client.exe').Path
-          $userData = Join-Path $env:RUNNER_TEMP 'apollo-packaged-user'
-          $process = Start-Process $exe -ArgumentList @(
-            '--disable-gpu',
-            "--user-data-dir=$userData"
-          ) -PassThru
-          Start-Sleep -Seconds 8
-          if ($process.HasExited) {
-            throw 'The pruned Windows application exited during packaged smoke testing.'
+
+          function Test-PackagedLaunch([string]$Mode, [string[]]$ExtraArguments) {
+            $userData = Join-Path $env:RUNNER_TEMP "apollo-packaged-$Mode"
+            $arguments = @("--user-data-dir=$userData") + $ExtraArguments
+            $process = Start-Process $exe -ArgumentList $arguments -PassThru
+            Start-Sleep -Seconds 8
+            if ($process.HasExited) {
+              throw "The pruned Windows application exited during $Mode rendering smoke testing."
+            }
+            & taskkill.exe /PID $process.Id /T /F | Out-Null
           }
-          & taskkill.exe /PID $process.Id /T /F | Out-Null
+
+          Test-PackagedLaunch 'hardware' @()
+          Test-PackagedLaunch 'software' @('--disable-gpu')
       - name: Enforce and report installer size
         shell: pwsh
         run: |
