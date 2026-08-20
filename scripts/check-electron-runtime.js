@@ -3,106 +3,105 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const FORBIDDEN_TAURI_ENTRIES = Object.freeze([
-  "src-tauri",
-  "tauri.conf.json",
-  "tauri.conf.json5",
-  "tauri.conf.toml",
-  "Tauri.toml"
-]);
-const RUNTIME_DIRECTORIES = Object.freeze(["src", "native-src"]);
-const RUNTIME_ROOT_FILES = Object.freeze([
+const REQUIRED_RUNTIME_FILES = Object.freeze([
   "main.js",
   "preload.js",
-  "discord-presence.js",
-  "discord-social-bridge.js"
+  "src/index.html",
+  "src/renderer.js",
+  "scripts/build-app.js"
 ]);
-const SCANNED_RUNTIME_EXTENSIONS = new Set([
-  ".cjs",
+const ALLOWED_DEVELOPMENT_DEPENDENCIES = new Set([
+  "electron",
+  "electron-builder",
+  "esbuild"
+]);
+const TEXT_EXTENSIONS = new Set([
+  ".c",
+  ".cc",
+  ".cpp",
+  ".cxx",
   ".css",
+  ".h",
+  ".hpp",
   ".html",
   ".js",
   ".json",
-  ".jsx",
+  ".md",
   ".mjs",
-  ".rs",
   ".toml",
   ".ts",
-  ".tsx"
+  ".tsx",
+  ".yml",
+  ".yaml"
 ]);
-const TAURI_RUNTIME_REFERENCE_PATTERN =
-  /@tauri-apps\/|\b__TAURI__\b|\btauri::|\btauri:\/\/|\btauri\.conf(?:\.json5?|\.toml)?\b/i;
-const TAURI_PACKAGE_REFERENCE_PATTERN = /@tauri-apps\//i;
-const TAURI_COMMAND_SEGMENT_PATTERN =
-  /(?:^|&&|\|\||;|\|)\s*(?:(?:cross-env(?:-shell)?|env)\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)*(?:(?:(?:npx|bunx)\s+(?:--?[^\s]+\s+)*|cargo\s+|yarn\s+|(?:npm|pnpm)\s+(?:exec\s+)?(?:--\s+)?))?(?:\.\/)?(?:node_modules\/\.bin\/)?tauri(?:\s|$)/i;
+const IGNORED_DIRECTORIES = new Set([
+  ".git",
+  "dist-app",
+  "node_modules",
+  "release",
+  "test-results"
+]);
+const RETIRED_DESKTOP_TOKEN = Buffer.from([116, 97, 117, 114, 105]).toString("utf8");
 
 function isDirectElectronStartCommand(value) {
   return String(value || "").trim() === "electron .";
-}
-
-function hasTauriPackageCommand(value) {
-  const command = String(value || "");
-  return TAURI_PACKAGE_REFERENCE_PATTERN.test(command)
-    || TAURI_COMMAND_SEGMENT_PATTERN.test(command);
 }
 
 function walkFiles(directoryPath) {
   if (!fs.existsSync(directoryPath)) {
     return [];
   }
-
   return fs.readdirSync(directoryPath, { withFileTypes: true })
     .flatMap((entry) => {
-      const resolvedPath = path.join(directoryPath, entry.name);
-      if (entry.isDirectory()) {
-        return walkFiles(resolvedPath);
+      if (entry.isDirectory() && IGNORED_DIRECTORIES.has(entry.name)) {
+        return [];
       }
-      return entry.isFile() ? [resolvedPath] : [];
+      const resolved = path.join(directoryPath, entry.name);
+      if (entry.isDirectory()) {
+        return walkFiles(resolved);
+      }
+      return entry.isFile() ? [resolved] : [];
     });
 }
 
-function validateRuntimeFile(projectRoot, filePath, errors) {
-  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
-    return;
-  }
-
-  if (!SCANNED_RUNTIME_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
-    return;
-  }
-
-  const source = fs.readFileSync(filePath, "utf8");
-  if (!TAURI_RUNTIME_REFERENCE_PATTERN.test(source)) {
-    return;
-  }
-
-  const relativePath = path.relative(projectRoot, filePath).split(path.sep).join("/");
-  errors.push(`Tauri runtime reference is not allowed in ${relativePath}.`);
+function findRetiredDesktopReferences(projectRoot) {
+  const pattern = new RegExp(RETIRED_DESKTOP_TOKEN, "i");
+  return walkFiles(projectRoot)
+    .filter((filePath) => {
+      const extension = path.extname(filePath).toLowerCase();
+      return TEXT_EXTENSIONS.has(extension) || path.basename(filePath) === ".gitignore";
+    })
+    .filter((filePath) => {
+      try {
+        return pattern.test(fs.readFileSync(filePath, "utf8"));
+      } catch {
+        return false;
+      }
+    })
+    .map((filePath) => path.relative(projectRoot, filePath).split(path.sep).join("/"));
 }
 
-function findLockedTauriPackages(packageLock = {}) {
-  return Object.keys(packageLock.packages || {})
-    .filter((packagePath) => {
-      const packageName = packagePath.replace(/^.*node_modules\//, "");
-      return packageName === "tauri" || packageName.startsWith("@tauri-apps/");
-    });
+function hasDistFileSet(buildFiles) {
+  return Array.isArray(buildFiles) && buildFiles.some((entry) => {
+    return entry
+      && typeof entry === "object"
+      && entry.from === "dist-app"
+      && entry.to === "."
+      && Array.isArray(entry.filter)
+      && entry.filter.includes("**/*");
+  });
 }
 
 function collectElectronRuntimeErrors(projectRoot) {
-  const packageJson = JSON.parse(
-    fs.readFileSync(path.join(projectRoot, "package.json"), "utf8")
-  );
-  const packageLockPath = path.join(projectRoot, "package-lock.json");
-  const packageLock = fs.existsSync(packageLockPath)
-    ? JSON.parse(fs.readFileSync(packageLockPath, "utf8"))
-    : {};
-  const dependencyGroups = [
-    packageJson.dependencies,
-    packageJson.devDependencies,
-    packageJson.optionalDependencies,
-    packageJson.peerDependencies
-  ].filter(Boolean);
-  const dependencyNames = new Set(dependencyGroups.flatMap((group) => Object.keys(group)));
   const errors = [];
+  const packagePath = path.join(projectRoot, "package.json");
+  const lockPath = path.join(projectRoot, "package-lock.json");
+  const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+  const packageLock = fs.existsSync(lockPath)
+    ? JSON.parse(fs.readFileSync(lockPath, "utf8"))
+    : { packages: {} };
+  const dependencies = Object.keys(packageJson.dependencies || {});
+  const developmentDependencies = Object.keys(packageJson.devDependencies || {});
 
   if (packageJson.main !== "main.js") {
     errors.push("package.json must use main.js as the Electron main-process entry.");
@@ -110,57 +109,73 @@ function collectElectronRuntimeErrors(projectRoot) {
   if (!isDirectElectronStartCommand(packageJson.scripts?.start)) {
     errors.push("The start script must be the direct Electron launch command: electron .");
   }
-  if (!dependencyNames.has("electron")) {
-    errors.push("Electron must remain an explicit development dependency.");
+  if (!packageJson.scripts?.["build:app"]?.includes("scripts/build-app.js")) {
+    errors.push("The production runtime must be generated by scripts/build-app.js.");
   }
-  if (!dependencyNames.has("electron-builder")) {
-    errors.push("electron-builder must remain the desktop application packager.");
-  }
-  if (Object.prototype.hasOwnProperty.call(packageJson, "tauri")) {
-    errors.push("A package.json Tauri configuration is not allowed.");
+  if (dependencies.length) {
+    errors.push(`Production dependencies are not allowed in the compact Electron runtime: ${dependencies.join(", ")}`);
   }
 
-  for (const [scriptName, command] of Object.entries(packageJson.scripts || {})) {
-    if (hasTauriPackageCommand(command)) {
-      errors.push(`Tauri command is not allowed in package script: ${scriptName}`);
+  for (const dependencyName of developmentDependencies) {
+    if (!ALLOWED_DEVELOPMENT_DEPENDENCIES.has(dependencyName)) {
+      errors.push(`Development dependency is outside the Electron toolchain allowlist: ${dependencyName}`);
+    }
+  }
+  for (const dependencyName of ALLOWED_DEVELOPMENT_DEPENDENCIES) {
+    if (!developmentDependencies.includes(dependencyName)) {
+      errors.push(`Missing required Electron toolchain dependency: ${dependencyName}`);
     }
   }
 
-  for (const dependencyName of dependencyNames) {
-    if (dependencyName === "tauri" || dependencyName.startsWith("@tauri-apps/")) {
-      errors.push(`Tauri dependency is not allowed: ${dependencyName}`);
-    }
+  if (packageJson.build?.asar !== true) {
+    errors.push("Electron packaging must keep ASAR enabled.");
   }
-  for (const packagePath of findLockedTauriPackages(packageLock)) {
-    errors.push(`Tauri package is not allowed in package-lock.json: ${packagePath}`);
+  if (packageJson.build?.compression !== "maximum") {
+    errors.push('Electron Builder compression must be set to "maximum".');
+  }
+  if (packageJson.build?.npmRebuild !== false) {
+    errors.push("Electron Builder must skip native dependency rebuilding for the dependency-free runtime.");
+  }
+  if (!hasDistFileSet(packageJson.build?.files)) {
+    errors.push("Electron Builder must package only the generated dist-app runtime.");
+  }
+  if (!Array.isArray(packageJson.build?.electronLanguages)
+      || packageJson.build.electronLanguages.length !== 1
+      || packageJson.build.electronLanguages[0] !== "en-US") {
+    errors.push("Electron packaging must retain only the en-US locale.");
   }
 
-  for (const entryName of FORBIDDEN_TAURI_ENTRIES) {
-    if (fs.existsSync(path.join(projectRoot, entryName))) {
-      errors.push(`Tauri project entry is not allowed: ${entryName}`);
+  const lockRoot = packageLock.packages?.[""] || {};
+  if (Object.keys(lockRoot.dependencies || {}).length) {
+    errors.push("package-lock.json must not retain production dependencies.");
+  }
+
+  for (const requiredFile of REQUIRED_RUNTIME_FILES) {
+    const resolved = path.join(projectRoot, requiredFile);
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+      errors.push(`Missing required Electron runtime file: ${requiredFile}`);
     }
   }
 
   for (const requiredFile of ["main.js", "preload.js"]) {
-    const filePath = path.join(projectRoot, requiredFile);
-    if (!fs.existsSync(filePath)) {
-      errors.push(`Missing Electron runtime file: ${requiredFile}`);
+    const resolved = path.join(projectRoot, requiredFile);
+    if (!fs.existsSync(resolved)) {
       continue;
     }
-
-    const source = fs.readFileSync(filePath, "utf8");
+    const source = fs.readFileSync(resolved, "utf8");
     if (!/require\(["']electron["']\)/.test(source)) {
       errors.push(`${requiredFile} must import Electron directly.`);
     }
   }
 
-  for (const directory of RUNTIME_DIRECTORIES) {
-    for (const filePath of walkFiles(path.join(projectRoot, directory))) {
-      validateRuntimeFile(projectRoot, filePath, errors);
-    }
+  const gitignorePath = path.join(projectRoot, ".gitignore");
+  const gitignore = fs.existsSync(gitignorePath) ? fs.readFileSync(gitignorePath, "utf8") : "";
+  if (!/(?:^|\n)dist-app\/(?:\n|$)/.test(gitignore)) {
+    errors.push("dist-app/ must remain an ignored generated directory.");
   }
-  for (const fileName of RUNTIME_ROOT_FILES) {
-    validateRuntimeFile(projectRoot, path.join(projectRoot, fileName), errors);
+
+  for (const relativePath of findRetiredDesktopReferences(projectRoot)) {
+    errors.push(`Retired desktop-shell reference is not allowed: ${relativePath}`);
   }
 
   return errors;
@@ -174,7 +189,7 @@ function run(projectRoot = path.resolve(__dirname, "..")) {
     return false;
   }
 
-  process.stdout.write("Electron client boundary verified; no Tauri project surface detected.\n");
+  process.stdout.write("Electron-only runtime boundary verified.\n");
   return true;
 }
 
@@ -183,18 +198,14 @@ if (require.main === module) {
 }
 
 module.exports = {
-  FORBIDDEN_TAURI_ENTRIES,
-  RUNTIME_DIRECTORIES,
-  RUNTIME_ROOT_FILES,
-  SCANNED_RUNTIME_EXTENSIONS,
-  TAURI_RUNTIME_REFERENCE_PATTERN,
-  TAURI_PACKAGE_REFERENCE_PATTERN,
-  TAURI_COMMAND_SEGMENT_PATTERN,
-  isDirectElectronStartCommand,
-  hasTauriPackageCommand,
-  findLockedTauriPackages,
-  walkFiles,
-  validateRuntimeFile,
+  ALLOWED_DEVELOPMENT_DEPENDENCIES,
+  IGNORED_DIRECTORIES,
+  REQUIRED_RUNTIME_FILES,
+  TEXT_EXTENSIONS,
   collectElectronRuntimeErrors,
-  run
+  findRetiredDesktopReferences,
+  hasDistFileSet,
+  isDirectElectronStartCommand,
+  run,
+  walkFiles
 };

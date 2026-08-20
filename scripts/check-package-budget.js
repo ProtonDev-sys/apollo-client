@@ -3,13 +3,12 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-const DEFAULT_MAX_ASAR_BYTES = 8 * 1024 * 1024;
+const DEFAULT_MAX_ASAR_BYTES = 1024 * 1024;
 
 function resolveMaxAsarBytes(value = process.env.APOLLO_MAX_ASAR_BYTES) {
   if (value === undefined || value === null || String(value).trim() === "") {
     return DEFAULT_MAX_ASAR_BYTES;
   }
-
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
     throw new RangeError("The ASAR byte budget must be a finite positive number.");
@@ -24,22 +23,12 @@ function checkPackageBudget({
   const resolvedMaxAsarBytes = resolveMaxAsarBytes(maxAsarBytes);
   const asarPath = path.join(projectRoot, "release", "linux-unpacked", "resources", "app.asar");
   if (!fs.existsSync(asarPath)) {
-    return {
-      ok: false,
-      asarPath,
-      size: 0,
-      error: "Packaged app.asar is missing."
-    };
+    return { ok: false, asarPath, size: 0, error: "Packaged app.asar is missing." };
   }
 
   const size = fs.statSync(asarPath).size;
   if (!size) {
-    return {
-      ok: false,
-      asarPath,
-      size,
-      error: "Packaged app.asar is empty."
-    };
+    return { ok: false, asarPath, size, error: "Packaged app.asar is empty." };
   }
   if (size > resolvedMaxAsarBytes) {
     return {
@@ -58,8 +47,7 @@ function run() {
   try {
     result = checkPackageBudget();
   } catch (error) {
-    process.stderr.write(`error: ${error?.message || "Invalid ASAR byte budget."}
-`);
+    process.stderr.write(`error: ${error?.message || "Invalid ASAR byte budget."}\n`);
     process.exitCode = 1;
     return false;
   }

@@ -14,7 +14,7 @@ Plugins can now:
 - subscribe to app lifecycle and playback events
 - access the DOM, browser APIs, and the desktop bridge already exposed in preload
 
-Plugins are loaded at runtime from disk-backed `.js` modules. Apollo seeds first-party plugins into the user-data `plugins/` directory on first run, then loads plugins from the configured runtime directories.
+The interface and lyrics plugins are compiled into the application. Additional trusted `.js` modules are loaded from the configured runtime directories without copying default files into user data.
 
 ## Architecture
 
@@ -379,14 +379,9 @@ export default automationPlugin;
 
 ## Registering a Plugin
 
-Drop a trusted `.js` ES module into one of the runtime plugin directories:
+Drop a trusted `.js` ES module into `APOLLO_PLUGIN_DIR` or the Electron user-data `plugins/` directory. Development builds additionally inspect plugin directories next to the executable and in the working directory.
 
-- `APOLLO_PLUGIN_DIR`
-- `plugins/` next to the installed executable
-- `plugins/` in the current working directory
-- `plugins/` in the Electron user-data directory
-
-Apollo watches those directories and reloads plugins when files change.
+Development directories are watched for changes. Packaged applications avoid persistent watchers unless `APOLLO_WATCH_RUNTIME_ASSETS=1` is explicitly set.
 
 ## Safety Guidance
 

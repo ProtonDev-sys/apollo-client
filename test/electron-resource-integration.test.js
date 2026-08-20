@@ -9,17 +9,26 @@ function read(relativePath) {
   return fs.readFileSync(path.join(projectRoot, relativePath), "utf8");
 }
 
-test("preload uses lazy native WebSocket signaling without the MQTT package", () => {
+test("preload uses lazy native WebSocket signaling without a package dependency", () => {
   const preload = read("preload.js");
   const packageJson = JSON.parse(read("package.json"));
 
-  assert.equal(packageJson.dependencies?.mqtt, undefined);
+  assert.deepEqual(packageJson.dependencies || {}, {});
   assert.doesNotMatch(preload, /require\(["']mqtt["']\)/);
   assert.match(preload, /lazyNativeMqtt/);
   assert.match(preload, /require\("\.\/src\/preload\/mqtt-websocket"\)/);
 });
 
-test("main process defers optional Discord work and uses asynchronous logging", () => {
+test("Discord presence uses the local native IPC implementation", () => {
+  const source = read("discord-presence.js");
+  const packageJson = JSON.parse(read("package.json"));
+
+  assert.equal(packageJson.dependencies?.["discord-rpc"], undefined);
+  assert.match(source, /require\("\.\/src\/main\/discord-ipc"\)/);
+  assert.match(read("src/main/discord-ipc.js"), /node:net/);
+});
+
+test("main process defers optional work and uses asynchronous logging", () => {
   const source = read("main.js");
 
   assert.match(source, /createAsyncLogWriter/);
@@ -46,20 +55,40 @@ test("renderer bounds caches, history, prefetch, and high-frequency playback wor
   assert.match(source, /persistPlaybackState\(\{ force: true \}\)/);
 });
 
-test("packaged runtime assets avoid persistent watchers and broad directory scans", () => {
+test("packaged runtime assets avoid watchers, broad scans, and startup seeding", () => {
   const source = read("src/preload/runtime-assets.js");
 
   assert.match(source, /const watchRuntimeAssets = !runtimeInfo\.isPackaged/);
   assert.match(source, /if \(watchRuntimeAssets && !watchersInitialised\)/);
+  assert.doesNotMatch(source, /ensureSeedRuntimeAssets/);
+  assert.doesNotMatch(source, /copyFileSync/);
   assert.doesNotMatch(source, /\n  initialiseWatchers\(\);\n\n  return \{/);
 });
 
-test("packaged source excludes retired desktop duplicates and uses maximum compression", () => {
+test("production packaging contains only generated Electron runtime files", () => {
   const packageJson = JSON.parse(read("package.json"));
 
   assert.equal(packageJson.build.asar, true);
   assert.equal(packageJson.build.compression, "maximum");
+  assert.equal(packageJson.build.npmRebuild, false);
+  assert.deepEqual(packageJson.build.electronLanguages, ["en-US"]);
+  assert.deepEqual(packageJson.build.files, [
+    { from: "dist-app", to: ".", filter: ["**/*"] }
+  ]);
+  assert.equal(packageJson.devDependencies.electron, "^43.4.1");
+  assert.equal(packageJson.devDependencies["electron-builder"], "^26.15.7");
+  assert.equal(packageJson.devDependencies.esbuild, "^0.28.2");
   assert.equal(fs.existsSync(path.join(projectRoot, "src", "desktop", "listen-along-signaling.js")), false);
   assert.equal(fs.existsSync(path.join(projectRoot, "src", "desktop", "runtime-assets.js")), false);
-  assert.match(read("src/styles.css"), /Electron resource containment/);
+});
+
+test("source UI uses system fonts and the build creates minified output", () => {
+  const html = read("src/index.html");
+  const buildScript = read("scripts/build-app.js");
+
+  assert.doesNotMatch(html, /fonts\.(?:googleapis|gstatic)\.com/);
+  assert.match(read("src/styles.css"), /system-ui/);
+  assert.match(buildScript, /minify: true/);
+  assert.match(buildScript, /bundle: true/);
+  assert.match(buildScript, /dist-app/);
 });

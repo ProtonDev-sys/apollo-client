@@ -11,86 +11,151 @@ permissions:
 
 jobs:
   verify:
-    name: Node ${{ matrix.node-version }}
+    name: Verify on Node.js ${{ matrix.node-version }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         node-version:
-          - 20.x
           - 22.x
+          - 24.x
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-      - name: Verify Electron runtime boundary
-        run: npm run check:runtime
-      - name: Verify Electron resource budgets
-        run: npm run check:resources
-      - name: Check JavaScript syntax
-        run: npm run check:syntax
-      - name: Run tests
-        run: npm test
-      - name: Audit production dependencies
-        run: npm run audit:deps
+      - name: Install development toolchain
+        run: npm ci
+      - name: Verify Electron runtime, budgets, syntax, tests, and generated bundle
+        run: npm run verify
+      - name: Audit the complete dependency tree
+        run: npm run audit:all
 
   ui-smoke:
-    name: Electron UI smoke
+    name: Native Electron UI smoke
     runs-on: ubuntu-latest
     env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
       ELECTRON_DISABLE_SECURITY_WARNINGS: "true"
       LIBGL_ALWAYS_SOFTWARE: "1"
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 22.x
+          node-version: 24.x
           cache: npm
-      - name: Install dependencies with Electron
+      - name: Install development toolchain
         run: npm ci
-      - name: Render and exercise the client UI
+      - name: Install the Electron binary
+        run: env -u ELECTRON_SKIP_BINARY_DOWNLOAD npm rebuild electron
+      - name: Exercise the desktop interface
         run: xvfb-run --auto-servernum --server-args="-screen 0 1440x900x24" npm run test:ui
-      - name: Upload rendered UI
-        uses: actions/upload-artifact@v4
+      - name: Upload rendered interface
+        uses: actions/upload-artifact@v7
         with:
           name: apollo-client-ui-smoke
           path: test-results/apollo-client-ui.png
           if-no-files-found: error
           retention-days: 7
 
-  toolchain:
-    name: Electron audit and package smoke
+  linux-package:
+    name: Compact Linux package
     runs-on: ubuntu-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: 22.x
+          node-version: 24.x
           cache: npm
-      - name: Install complete dependency tree
+      - name: Install development toolchain
         run: npm ci
-      - name: Audit complete dependency tree
-        run: npm run audit:all
-      - name: Prepare optional native resource directory
-        run: mkdir -p native-bin
-      - name: Build unpacked Linux application
-        run: npm run pack:linux:ci
-      - name: Verify packaged application structure and size
+      - name: Install the Electron binary
+        run: env -u ELECTRON_SKIP_BINARY_DOWNLOAD npm rebuild electron
+      - name: Build and validate the unpacked application
         shell: bash
         run: |
-          test -d release/linux-unpacked
-          test -f release/linux-unpacked/resources/app.asar
-          test -s release/linux-unpacked/resources/app.asar
+          mkdir -p native-bin
+          npm run pack:linux:ci
           npm run check:package
+      - name: Report package sizes
+        shell: bash
+        run: |
+          asar_bytes=$(stat -c%s release/linux-unpacked/resources/app.asar)
+          unpacked_bytes=$(du -sb release/linux-unpacked | cut -f1)
+          printf 'app.asar: %s bytes\nLinux unpacked directory: %s bytes\n' "$asar_bytes" "$unpacked_bytes"
+          {
+            echo '### Linux package size'
+            echo
+            echo "- app.asar: ${asar_bytes} bytes"
+            echo "- unpacked directory: ${unpacked_bytes} bytes"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload compact ASAR
+        uses: actions/upload-artifact@v7
+        with:
+          name: apollo-client-linux-asar
+          path: release/linux-unpacked/resources/app.asar
+          if-no-files-found: error
+          retention-days: 7
+
+  windows-package:
+    name: Compact Windows installer
+    runs-on: windows-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          cache: npm
+      - name: Install development toolchain
+        run: npm ci
+      - name: Install the Electron binary
+        shell: pwsh
+        run: |
+          Remove-Item Env:ELECTRON_SKIP_BINARY_DOWNLOAD -ErrorAction SilentlyContinue
+          npm rebuild electron
+      - name: Build the English-only installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force native-bin | Out-Null
+          npm run build:app
+          npx electron-builder --win nsis --publish never
+      - name: Enforce and report installer size
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem release -Filter 'Apollo-Client-Setup-*.exe' | Select-Object -First 1
+          if (-not $installer) {
+            throw 'Windows installer was not generated.'
+          }
+          $maxBytes = 125829120
+          if ($installer.Length -gt $maxBytes) {
+            throw "Windows installer exceeds the $maxBytes-byte budget: $($installer.Length) bytes."
+          }
+          "Windows installer: $($installer.Length) bytes"
+          @(
+            '### Windows package size',
+            '',
+            "- installer: $($installer.Length) bytes",
+            "- budget: $maxBytes bytes"
+          ) | Add-Content $env:GITHUB_STEP_SUMMARY
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: apollo-client-windows-installer
+          path: release/Apollo-Client-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 7

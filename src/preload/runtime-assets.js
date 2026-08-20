@@ -1,28 +1,5 @@
 const { createEventChannel } = require("./state-store");
 
-const DEFAULT_THEME_SEED = {
-  fonts: {
-    ui: "\"IBM Plex Sans\", sans-serif",
-    mono: "\"IBM Plex Mono\", monospace"
-  },
-  variables: {
-    bg: "#050505",
-    surface: "#0c0c0c",
-    "surface-2": "#111111",
-    "surface-3": "#171717",
-    border: "rgba(255, 255, 255, 0.08)",
-    "border-soft": "rgba(255, 255, 255, 0.04)",
-    text: "#f4f1eb",
-    muted: "#9f988d",
-    "muted-2": "#7b756b",
-    accent: "#dc55dc",
-    "accent-soft": "rgba(220, 85, 220, 0.18)",
-    progress: "#dc55dc",
-    shadow: "0 18px 60px rgba(0, 0, 0, 0.42)"
-  },
-  css: ""
-};
-
 function sanitiseThemeConfig(theme = {}) {
   const variables = {};
   const sources = [theme.variables, theme.vars];
@@ -100,16 +77,6 @@ function createRuntimeAssetsService({
     });
   }
 
-  function ensureDirectory(directoryPath) {
-    if (!directoryPath) {
-      return;
-    }
-
-    fs.mkdirSync(directoryPath, {
-      recursive: true
-    });
-  }
-
   function getRuntimePluginDirectories() {
     return uniquePaths([
       env.APOLLO_PLUGIN_DIR,
@@ -130,46 +97,6 @@ function createRuntimeAssetsService({
       ] : []),
       runtimeInfo.userDataPath ? path.join(runtimeInfo.userDataPath, "themes") : ""
     ]);
-  }
-
-  function getDefaultRuntimePluginPath() {
-    const pluginDirectories = getRuntimePluginDirectories();
-    const userPluginDirectory = pluginDirectories[pluginDirectories.length - 1];
-    return userPluginDirectory ? path.join(userPluginDirectory, "lyrics-plugin.js") : "";
-  }
-
-  function getDefaultRuntimeThemePath() {
-    const themeDirectories = getRuntimeThemeDirectories();
-    const userThemeDirectory = themeDirectories[themeDirectories.length - 1];
-    return userThemeDirectory ? path.join(userThemeDirectory, "default-theme.json") : "";
-  }
-
-  function ensureSeedRuntimeAssets() {
-    const defaultPluginTarget = getDefaultRuntimePluginPath();
-    const defaultThemeTarget = getDefaultRuntimeThemePath();
-
-    if (defaultPluginTarget) {
-      ensureDirectory(path.dirname(defaultPluginTarget));
-      if (!fs.existsSync(defaultPluginTarget)) {
-        fs.copyFileSync(
-          path.join(appRootPath, "src", "plugins", "lyrics-plugin.js"),
-          defaultPluginTarget
-        );
-        logEvent("runtime-assets", "seeded default plugin", {
-          target: defaultPluginTarget
-        });
-      }
-    }
-
-    if (defaultThemeTarget) {
-      ensureDirectory(path.dirname(defaultThemeTarget));
-      if (!fs.existsSync(defaultThemeTarget)) {
-        fs.writeFileSync(defaultThemeTarget, JSON.stringify(DEFAULT_THEME_SEED, null, 2));
-        logEvent("runtime-assets", "seeded default theme", {
-          target: defaultThemeTarget
-        });
-      }
-    }
   }
 
   function resolveAppConfigCandidatePaths() {
@@ -259,8 +186,6 @@ function createRuntimeAssetsService({
   }
 
   function loadApolloAppConfig() {
-    ensureSeedRuntimeAssets();
-
     const configPath = resolveAppConfigPath();
     const themeDirectories = getRuntimeThemeDirectories();
     const pluginDirectories = getRuntimePluginDirectories();
@@ -320,8 +245,6 @@ function createRuntimeAssetsService({
   }
 
   function discoverRuntimePlugins() {
-    ensureSeedRuntimeAssets();
-
     const pluginEntries = [];
     const seen = new Set();
 
