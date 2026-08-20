@@ -9,6 +9,7 @@ const DEFAULT_BUDGETS = Object.freeze({
   rendererBytes: 347000,
   runtimeSourceBytes: 1200 * 1024
 });
+const ELECTRON_PRUNE_HOOK = "scripts/prune-electron-runtime.js";
 const FORBIDDEN_PACKAGED_PATHS = Object.freeze([
   "src/desktop/listen-along-signaling.js",
   "src/desktop/runtime-assets.js"
@@ -79,6 +80,9 @@ function collectResourceBudgetErrors(projectRoot, budgets = DEFAULT_BUDGETS) {
   if (packageJson.build?.compression !== "maximum") {
     errors.push('Electron Builder compression must be set to "maximum".');
   }
+  if (packageJson.build?.afterPack !== ELECTRON_PRUNE_HOOK) {
+    errors.push(`Electron Builder must run the ${ELECTRON_PRUNE_HOOK} hook.`);
+  }
   if (!hasCompactFileSet(packageJson.build?.files)) {
     errors.push("Electron Builder must package only the generated dist-app runtime.");
   }
@@ -144,6 +148,7 @@ if (require.main === module) {
 
 module.exports = {
   DEFAULT_BUDGETS,
+  ELECTRON_PRUNE_HOOK,
   FORBIDDEN_PACKAGED_PATHS,
   calculateRuntimeSourceBytes,
   collectResourceBudgetErrors,

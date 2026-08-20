@@ -82,12 +82,38 @@ jobs:
         run: npm ci
       - name: Install the Electron binary
         run: env -u ELECTRON_SKIP_BINARY_DOWNLOAD npm rebuild electron
-      - name: Build and validate the unpacked application
+      - name: Build and validate the pruned application
         shell: bash
         run: |
-          mkdir -p native-bin
           npm run pack:linux:ci
           npm run check:package
+      - name: Exercise packaged hardware and software rendering
+        shell: bash
+        run: |
+          set -euo pipefail
+          executable=$(find release/linux-unpacked -maxdepth 1 -type f -perm -111 ! -name 'chrome-sandbox' ! -name 'chrome_crashpad_handler' | head -n 1)
+          test -n "$executable"
+
+          launch_packaged() {
+            local mode="$1"
+            shift
+            local user_data="$RUNNER_TEMP/apollo-packaged-$mode"
+            xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' bash -c '
+              set -e
+              app="$1"
+              user_data="$2"
+              shift 2
+              "$app" --no-sandbox --user-data-dir="$user_data" "$@" >"$user_data.log" 2>&1 &
+              pid=$!
+              sleep 8
+              kill -0 "$pid"
+              kill "$pid" || true
+              wait "$pid" || true
+            ' _ "$executable" "$user_data" "$@"
+          }
+
+          launch_packaged hardware
+          launch_packaged software --disable-gpu
       - name: Report package sizes
         shell: bash
         run: |
@@ -109,7 +135,7 @@ jobs:
           retention-days: 7
 
   windows-package:
-    name: Compact Windows installer
+    name: Compact Windows distributions
     runs-on: windows-latest
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
@@ -128,34 +154,104 @@ jobs:
         run: |
           Remove-Item Env:ELECTRON_SKIP_BINARY_DOWNLOAD -ErrorAction SilentlyContinue
           npm rebuild electron
-      - name: Build the English-only installer
+      - name: Build the pruned English-only installer
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force native-bin | Out-Null
-          npm run build:app
-          npx electron-builder --win nsis --publish never
-      - name: Enforce and report installer size
+          npm run pack:win:ci
+          npm run check:package
+      - name: Exercise packaged hardware and software rendering
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path 'release/win-unpacked/Apollo Client.exe').Path
+
+          function Test-PackagedLaunch([string]$Mode, [string[]]$ExtraArguments) {
+            $userData = Join-Path $env:RUNNER_TEMP "apollo-packaged-$Mode"
+            $arguments = @("--user-data-dir=$userData") + $ExtraArguments
+            $process = Start-Process $exe -ArgumentList $arguments -PassThru
+            Start-Sleep -Seconds 8
+            if ($process.HasExited) {
+              throw "The pruned Windows application exited during $Mode rendering smoke testing."
+            }
+            & taskkill.exe /PID $process.Id /T /F | Out-Null
+          }
+
+          Test-PackagedLaunch 'hardware' @()
+          Test-PackagedLaunch 'software' @('--disable-gpu')
+      - name: Create and exercise the portable archive
+        shell: pwsh
+        run: |
+          node scripts/build-windows-portable.js
+          $sevenZip = (Get-Command 7z.exe -ErrorAction Stop).Source
+          $archive = Get-ChildItem release -Filter 'Apollo-Client-Portable-*.7z' | Select-Object -First 1
+          if (-not $archive) {
+            throw 'Windows portable archive was not generated.'
+          }
+
+          $extractDirectory = Join-Path $env:RUNNER_TEMP 'apollo-portable-extracted'
+          Remove-Item $extractDirectory -Recurse -Force -ErrorAction SilentlyContinue
+          & $sevenZip x $archive.FullName "-o$extractDirectory" -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "Portable archive extraction exited with code $LASTEXITCODE."
+          }
+
+          $portableExe = Join-Path $extractDirectory 'Apollo Client.exe'
+          if (-not (Test-Path $portableExe)) {
+            throw 'Portable archive does not contain the Electron executable.'
+          }
+          $process = Start-Process $portableExe -ArgumentList @(
+            '--disable-gpu',
+            "--user-data-dir=$(Join-Path $env:RUNNER_TEMP 'apollo-portable-user')"
+          ) -PassThru
+          Start-Sleep -Seconds 8
+          if ($process.HasExited) {
+            throw 'The extracted portable application exited during smoke testing.'
+          }
+          & taskkill.exe /PID $process.Id /T /F | Out-Null
+      - name: Enforce and report Windows sizes
         shell: pwsh
         run: |
           $installer = Get-ChildItem release -Filter 'Apollo-Client-Setup-*.exe' | Select-Object -First 1
+          $portable = Get-ChildItem release -Filter 'Apollo-Client-Portable-*.7z' | Select-Object -First 1
           if (-not $installer) {
             throw 'Windows installer was not generated.'
           }
-          $maxBytes = 125829120
-          if ($installer.Length -gt $maxBytes) {
-            throw "Windows installer exceeds the $maxBytes-byte budget: $($installer.Length) bytes."
+          if (-not $portable) {
+            throw 'Windows portable archive was not generated.'
           }
+
+          $maxInstallerBytes = 96000000
+          $maxPortableBytes = 78000000
+          if ($installer.Length -gt $maxInstallerBytes) {
+            throw "Windows installer exceeds the $maxInstallerBytes-byte budget: $($installer.Length) bytes."
+          }
+          if ($portable.Length -gt $maxPortableBytes) {
+            throw "Windows portable archive exceeds the $maxPortableBytes-byte budget: $($portable.Length) bytes."
+          }
+
+          $unpackedBytes = (Get-ChildItem release/win-unpacked -Recurse -File | Measure-Object Length -Sum).Sum
           "Windows installer: $($installer.Length) bytes"
+          "Windows portable archive: $($portable.Length) bytes"
+          "Windows unpacked runtime: $unpackedBytes bytes"
           @(
             '### Windows package size',
             '',
             "- installer: $($installer.Length) bytes",
-            "- budget: $maxBytes bytes"
+            "- portable 7-Zip archive: $($portable.Length) bytes",
+            "- unpacked runtime: $unpackedBytes bytes",
+            "- installer budget: $maxInstallerBytes bytes",
+            "- portable budget: $maxPortableBytes bytes"
           ) | Add-Content $env:GITHUB_STEP_SUMMARY
       - name: Upload Windows installer
         uses: actions/upload-artifact@v7
         with:
           name: apollo-client-windows-installer
           path: release/Apollo-Client-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload Windows portable archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: apollo-client-windows-portable
+          path: release/Apollo-Client-Portable-*.7z
           if-no-files-found: error
           retention-days: 7

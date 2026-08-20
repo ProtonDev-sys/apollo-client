@@ -18,6 +18,36 @@ const CLIENT_UPDATE_TIMEOUT_MS = 5000;
 const ALLOWED_EXTERNAL_PROTOCOLS = new Set(["http:", "https:"]);
 const TRUSTED_RENDERER_ENTRY_PATH = path.join(__dirname, "src", "index.html");
 const TRUSTED_RENDERER_ENTRY_URL = pathToFileURL(TRUSTED_RENDERER_ENTRY_PATH).toString();
+const DISABLED_CHROMIUM_FEATURES = Object.freeze([
+  "Vulkan",
+  "WebGPU",
+  "WebGPUService"
+]);
+
+function configureLeanChromiumRuntime(commandLine = app.commandLine) {
+  const existingFeatures = typeof commandLine?.getSwitchValue === "function"
+    ? String(commandLine.getSwitchValue("disable-features") || "")
+    : "";
+  const disabledFeatures = new Set(
+    existingFeatures
+      .split(",")
+      .map((feature) => feature.trim())
+      .filter(Boolean)
+  );
+  DISABLED_CHROMIUM_FEATURES.forEach((feature) => disabledFeatures.add(feature));
+
+  if (typeof commandLine?.removeSwitch === "function") {
+    commandLine.removeSwitch("disable-features");
+  }
+  commandLine?.appendSwitch?.(
+    "disable-features",
+    [...disabledFeatures].join(",")
+  );
+
+  return [...disabledFeatures];
+}
+
+configureLeanChromiumRuntime();
 
 const discordPresence = createDiscordPresenceController({
   appName: "Apollo Client",
