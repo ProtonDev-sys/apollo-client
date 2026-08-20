@@ -22,7 +22,7 @@ jobs:
           node-version: 22.x
           cache: npm
       - name: Refresh patched production resolutions
-        run: npm audit fix --package-lock-only
+        run: npm audit fix --package-lock-only --omit=dev
       - name: Verify production dependency audit
         run: npm audit --omit=dev
       - name: Commit refreshed lockfile
