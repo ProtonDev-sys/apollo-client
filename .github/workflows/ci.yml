@@ -31,6 +31,13 @@ jobs:
           cache: npm
       - name: Apply runtime and renderer controls
         run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          main_path = Path("main.js")
+          source = main_path.read_text(encoding="utf-8")
+          source = source.replace("${message}\\n`);", "${message}\n`);", 1)
+          main_path.write_text(source, encoding="utf-8")
+          PY
           python3 scripts/apply-electron-resource-pass.py
           git rm src/desktop/listen-along-signaling.js src/desktop/runtime-assets.js
       - name: Regenerate compact dependency lockfile
