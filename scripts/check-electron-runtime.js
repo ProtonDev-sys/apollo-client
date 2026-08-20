@@ -10,7 +10,7 @@ const FORBIDDEN_TAURI_ENTRIES = Object.freeze([
   "tauri.conf.toml",
   "Tauri.toml"
 ]);
-const RUNTIME_DIRECTORIES = Object.freeze(["src"]);
+const RUNTIME_DIRECTORIES = Object.freeze(["src", "native-src"]);
 const RUNTIME_ROOT_FILES = Object.freeze([
   "main.js",
   "preload.js",
@@ -32,6 +32,8 @@ const SCANNED_RUNTIME_EXTENSIONS = new Set([
 ]);
 const TAURI_RUNTIME_REFERENCE_PATTERN =
   /@tauri-apps\/|\b__TAURI__\b|\btauri::|\btauri:\/\/|\btauri\.conf(?:\.json5?|\.toml)?\b/i;
+const TAURI_PACKAGE_SCRIPT_PATTERN =
+  /@tauri-apps\/|\b(?:cargo\s+)?tauri\s+(?:add|android|build|bundle|dev|icon|info|init|ios|plugin|remove|signer)\b/i;
 
 function isDirectElectronStartCommand(value) {
   return String(value || "").trim() === "electron .";
@@ -95,6 +97,15 @@ function collectElectronRuntimeErrors(projectRoot) {
   if (!dependencyNames.has("electron-builder")) {
     errors.push("electron-builder must remain the desktop application packager.");
   }
+  if (Object.prototype.hasOwnProperty.call(packageJson, "tauri")) {
+    errors.push("A package.json Tauri configuration is not allowed.");
+  }
+
+  for (const [scriptName, command] of Object.entries(packageJson.scripts || {})) {
+    if (TAURI_PACKAGE_SCRIPT_PATTERN.test(String(command || ""))) {
+      errors.push(`Tauri command is not allowed in package script: ${scriptName}`);
+    }
+  }
 
   for (const dependencyName of dependencyNames) {
     if (dependencyName === "tauri" || dependencyName.startsWith("@tauri-apps/")) {
@@ -155,6 +166,7 @@ module.exports = {
   RUNTIME_ROOT_FILES,
   SCANNED_RUNTIME_EXTENSIONS,
   TAURI_RUNTIME_REFERENCE_PATTERN,
+  TAURI_PACKAGE_SCRIPT_PATTERN,
   isDirectElectronStartCommand,
   walkFiles,
   validateRuntimeFile,
