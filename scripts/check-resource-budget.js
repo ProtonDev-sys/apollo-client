@@ -6,7 +6,7 @@ const path = require("node:path");
 const DEFAULT_BUDGETS = Object.freeze({
   mainBytes: 32 * 1024,
   preloadBytes: 12 * 1024,
-  rendererBytes: 360 * 1024,
+  rendererBytes: 347000,
   packagedSourceBytes: 1200 * 1024
 });
 const ALLOWED_PRODUCTION_DEPENDENCIES = new Set(["discord-rpc"]);
