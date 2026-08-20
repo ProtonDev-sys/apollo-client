@@ -1,4 +1,7 @@
+import { consumeJsonEventStream } from "./event-stream.js";
+
 const JSON_CONTENT_TYPE_PATTERN = /\bjson\b/i;
+const EVENT_STREAM_CONTENT_TYPE_PATTERN = /^text\/event-stream\b/i;
 
 async function parseResponseBody(response) {
   if (!response || response.status === 204 || response.status === 205) {
@@ -55,7 +58,7 @@ export function createApolloTransport({
   onConnectionFailure,
   onAuthFailure
 }) {
-  return async function requestJson(path, options = {}) {
+  function prepareRequest(path, options = {}, accept = "") {
     const { skipAuth = false, suppressConnectionModal = false, ...fetchOptions } = options;
     const headers = new Headers(fetchOptions.headers || {});
     const authHeader = typeof getAuthorizationHeader === "function" ? getAuthorizationHeader() : "";
@@ -65,6 +68,9 @@ export function createApolloTransport({
     }
     if (!skipAuth && authHeader && !headers.has("Authorization")) {
       headers.set("Authorization", authHeader);
+    }
+    if (accept && !headers.has("Accept")) {
+      headers.set("Accept", accept);
     }
 
     let requestUrl = "";
@@ -81,12 +87,22 @@ export function createApolloTransport({
       throw connectionError;
     }
 
-    let response;
-    try {
-      response = await fetch(requestUrl, {
+    return {
+      requestUrl,
+      skipAuth,
+      suppressConnectionModal,
+      fetchOptions: {
         ...fetchOptions,
         headers
-      });
+      }
+    };
+  }
+
+  async function performRequest(path, options = {}, accept = "") {
+    const prepared = prepareRequest(path, options, accept);
+    let response;
+    try {
+      response = await fetch(prepared.requestUrl, prepared.fetchOptions);
     } catch (error) {
       if (error?.name === "AbortError") {
         throw error;
@@ -96,32 +112,77 @@ export function createApolloTransport({
         buildConnectionFailureMessage(error, getApiBase()),
         error
       );
-      if (!suppressConnectionModal) {
+      if (!prepared.suppressConnectionModal) {
         onConnectionFailure?.(connectionError);
       }
       throw connectionError;
     }
 
     onConnectionRecovered?.();
+    return {
+      response,
+      skipAuth: prepared.skipAuth
+    };
+  }
 
+  async function throwResponseError(response, skipAuth) {
     const payload = await parseResponseBody(response);
-    if (!response.ok) {
-      const errorMessage = typeof payload === "object" && payload?.error
-        ? payload.error
-        : typeof payload === "string" && payload.trim()
-          ? payload.trim()
-          : `Request failed with ${response.status}`;
+    const errorMessage = typeof payload === "object" && payload?.error
+      ? payload.error
+      : typeof payload === "string" && payload.trim()
+        ? payload.trim()
+        : `Request failed with ${response.status}`;
 
-      if (response.status === 401 && !skipAuth) {
-        onAuthFailure?.(errorMessage);
-        const authError = new Error(errorMessage);
-        authError.code = "AUTH_REQUIRED";
-        throw authError;
-      }
-
-      throw new Error(errorMessage);
+    if (response.status === 401 && !skipAuth) {
+      onAuthFailure?.(errorMessage);
+      const authError = new Error(errorMessage);
+      authError.code = "AUTH_REQUIRED";
+      throw authError;
     }
 
-    return payload;
+    throw new Error(errorMessage);
+  }
+
+  async function requestJson(path, options = {}) {
+    const { response, skipAuth } = await performRequest(path, options, "application/json");
+    if (!response.ok) {
+      await throwResponseError(response, skipAuth);
+    }
+    return parseResponseBody(response);
+  }
+
+  requestJson.requestEventStream = async function requestEventStream(
+    path,
+    options = {},
+    onEvent = () => {}
+  ) {
+    if (typeof onEvent !== "function") {
+      throw new TypeError("Event-stream onEvent must be a function.");
+    }
+
+    const { response, skipAuth } = await performRequest(path, options, "text/event-stream");
+    if (!response.ok) {
+      await throwResponseError(response, skipAuth);
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    if (!EVENT_STREAM_CONTENT_TYPE_PATTERN.test(contentType)) {
+      const payload = await parseResponseBody(response);
+      const event = {
+        event: "done",
+        id: "",
+        data: payload,
+        done: true
+      };
+      await onEvent(event);
+      return event;
+    }
+
+    return consumeJsonEventStream(response, {
+      signal: options.signal || null,
+      onEvent
+    });
   };
+
+  return requestJson;
 }
