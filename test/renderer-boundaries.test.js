@@ -45,8 +45,29 @@ test("listen-along fallback uses the shared polling lifecycle", () => {
   assert.match(source, /const joinedListenAlongPolling = createPollingController\(/);
   assert.match(source, /joinedListenAlongPolling\.start\(\)/);
   assert.match(source, /joinedListenAlongPolling\.stop\(\)/);
+  assert.match(
+    source,
+    /function setupListenAlongJoinDataChannel[\s\S]*?channel\.onopen = \(\) => \{[\s\S]*?joinedListenAlongPolling\.stop\(\);/
+  );
+  assert.match(
+    source,
+    /Direct peer connect timed out\.[\s\S]*?startJoinedListenAlongPolling\(sessionId,/
+  );
   assert.doesNotMatch(source, /pollHandle\s*:/);
   assert.doesNotMatch(source, /listenAlongState\.pollHandle/);
+});
+
+test("listen-along captures the active playback deck", () => {
+  const source = readRenderer();
+
+  assert.match(
+    source,
+    /function getListenAlongCaptureStream\(\) \{[\s\S]*?const sourceElement = getActiveAudioElement\(\);/
+  );
+  assert.doesNotMatch(
+    source,
+    /function getListenAlongCaptureStream\(\) \{\s*if \(typeof audioPlayer\.captureStream/
+  );
 });
 
 test("renderer decomposition reduces the top-level module size", () => {
