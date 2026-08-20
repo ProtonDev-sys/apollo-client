@@ -1,6 +1,7 @@
 const SEARCH_MARK_PATTERN = /\p{M}+/gu;
 const SEARCH_SEPARATOR_PATTERN = /[^\p{L}\p{N}]+/gu;
-const MAX_PREFIX_LENGTH = 32;
+const MAX_PREFIX_LENGTH = 16;
+const SUBSTRING_GRAM_LENGTH = 3;
 
 export function normaliseSearchText(value) {
   return String(value || "")
@@ -75,6 +76,18 @@ function intersectSets(left, right) {
     }
   }
   return result;
+}
+
+function createSubstringGrams(token) {
+  if (token.length < SUBSTRING_GRAM_LENGTH) {
+    return [];
+  }
+
+  const grams = new Set();
+  for (let index = 0; index <= token.length - SUBSTRING_GRAM_LENGTH; index += 1) {
+    grams.add(token.slice(index, index + SUBSTRING_GRAM_LENGTH));
+  }
+  return Array.from(grams);
 }
 
 export function createTrackSearchDocument(track = {}, sourceIndex = 0) {
@@ -222,6 +235,7 @@ export function buildTrackSearchIndex(tracks = []) {
     .map((track, sourceIndex) => createTrackSearchDocument(track, sourceIndex));
   const exactTokenIndex = new Map();
   const prefixTokenIndex = new Map();
+  const substringGramIndex = new Map();
 
   documents.forEach((document, documentIndex) => {
     document.tokens.forEach((token) => {
@@ -230,32 +244,57 @@ export function buildTrackSearchIndex(tracks = []) {
       for (let length = 1; length <= prefixLimit; length += 1) {
         addIndexValue(prefixTokenIndex, token.slice(0, length), documentIndex);
       }
+      createSubstringGrams(token).forEach((gram) => {
+        addIndexValue(substringGramIndex, gram, documentIndex);
+      });
     });
   });
 
   return {
     documents,
     exactTokenIndex,
-    prefixTokenIndex
+    prefixTokenIndex,
+    substringGramIndex
   };
 }
 
-function getTokenCandidates(index, token) {
-  const indexedCandidates = unionSets(
-    index.exactTokenIndex.get(token),
-    index.prefixTokenIndex.get(token)
-  );
-  if (indexedCandidates.size) {
-    return indexedCandidates;
+function getSubstringCandidates(index, token) {
+  const grams = createSubstringGrams(token);
+  if (!grams.length) {
+    const candidates = new Set();
+    index.documents.forEach((document, documentIndex) => {
+      if (document.searchableText.includes(token)) {
+        candidates.add(documentIndex);
+      }
+    });
+    return candidates;
   }
 
-  const fallback = new Set();
-  index.documents.forEach((document, documentIndex) => {
-    if (document.searchableText.includes(token)) {
-      fallback.add(documentIndex);
+  let candidates = null;
+  for (const gram of grams) {
+    const gramCandidates = index.substringGramIndex.get(gram);
+    if (!gramCandidates) {
+      return new Set();
     }
-  });
-  return fallback;
+    candidates = intersectSets(candidates, gramCandidates);
+    if (!candidates.size) {
+      return candidates;
+    }
+  }
+
+  return new Set(
+    Array.from(candidates || []).filter((documentIndex) =>
+      index.documents[documentIndex].searchableText.includes(token)
+    )
+  );
+}
+
+function getTokenCandidates(index, token) {
+  return unionSets(
+    index.exactTokenIndex.get(token),
+    index.prefixTokenIndex.get(token),
+    getSubstringCandidates(index, token)
+  );
 }
 
 export function searchTrackIndex(index, query, { limit = Number.POSITIVE_INFINITY } = {}) {
@@ -397,6 +436,8 @@ export function createTimedLruCache({
         entries.delete(key);
         return false;
       }
+      entries.delete(key);
+      entries.set(key, entry);
       return true;
     },
     delete(key) {
