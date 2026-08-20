@@ -1,0 +1,284 @@
+from pathlib import Path
+
+
+renderer_path = Path("src/renderer.js")
+source = renderer_path.read_text(encoding="utf-8")
+
+
+def replace_once(old: str, new: str, label: str) -> None:
+    global source
+    count = source.count(old)
+    if count != 1:
+        raise SystemExit(f"{label}: expected one match, found {count}")
+    source = source.replace(old, new, 1)
+
+
+def remove_section(start: str, end: str, label: str) -> None:
+    global source
+    start_count = source.count(start)
+    end_count = source.count(end)
+    if start_count != 1 or end_count != 1:
+        raise SystemExit(
+            f"{label}: expected one boundary each, "
+            f"found start={start_count}, end={end_count}"
+        )
+
+    start_index = source.index(start)
+    end_index = source.index(end, start_index)
+    source = source[:start_index] + source[end_index:]
+
+
+replace_once(
+    '''import {
+  escapeHtml as escapeHtmlValue,
+  formatDuration as formatDurationValue,
+  providerLabel as formatProviderLabel
+} from "./renderer/formatters.js";
+''',
+    '''import {
+  escapeHtml as escapeHtmlValue,
+  formatDuration as formatDurationValue,
+  providerLabel as formatProviderLabel
+} from "./renderer/formatters.js";
+import {
+  areTracksEquivalent,
+  buildTrackKey,
+  buildTrackMetadataSnapshot,
+  getTrackNormalizedDuration,
+  getTrackNormalizedText,
+  hasMatchingNormalizedMetadata,
+  hasMatchingProviderIds,
+  isGenericAlbumName,
+  isTrackLikelyPlayable,
+  normaliseMetadataText,
+  normaliseProviderIds,
+  normaliseTrackArtists,
+  normaliseTrackExplicitFlag,
+  normaliseTrackNumberTag,
+  normaliseTrackReleaseDate,
+  PROVIDER_ID_KEYS
+} from "./renderer/track-model.js";
+import { createPollingController } from "./renderer/polling-controller.js";
+''',
+    "renderer imports",
+)
+
+replace_once(
+    'const PROVIDER_ID_KEYS = ["spotify", "youtube", "soundcloud", "itunes", "deezer", "isrc"];\n',
+    "",
+    "provider id constant",
+)
+replace_once(
+    'const GENERIC_ALBUM_NAMES = new Set(["", "singles", "youtube", "soundcloud", "spotify", "deezer"]);\n',
+    "",
+    "generic album constant",
+)
+replace_once(
+    "  pollHandle: 0,\n",
+    "",
+    "legacy poll handle",
+)
+
+replace_once(
+    '''  signalingSubscribedRooms: new Set()
+};
+
+function createPlaylistModalState(overrides = {}) {
+''',
+    '''  signalingSubscribedRooms: new Set()
+};
+const joinedListenAlongPolling = createPollingController({
+  intervalMs: DISCORD_LISTEN_SESSION_POLL_MS,
+  task: () => refreshJoinedListenAlongSession(),
+  setIntervalFn: (callback, intervalMs) => window.setInterval(callback, intervalMs),
+  clearIntervalFn: (handle) => window.clearInterval(handle),
+  onError: (error) => {
+    logClient("listen-along", "fallback polling failed", {
+      error: error?.message || "unknown"
+    });
+  }
+});
+
+function createPlaylistModalState(overrides = {}) {
+''',
+    "polling controller integration",
+)
+
+remove_section(
+    "function buildTrackKey(prefix, id) {",
+    "function buildSearchCacheKey(query, options = {}) {",
+    "track normalization extraction",
+)
+remove_section(
+    "function hasMatchingProviderIds(leftTrack, rightTrack) {",
+    "function findLibraryMatch(track) {",
+    "track matching extraction",
+)
+remove_section(
+    "function areTracksEquivalent(leftTrack, rightTrack) {",
+    "function dedupeEquivalentTracks(tracks = []) {",
+    "track equivalence extraction",
+)
+remove_section(
+    "function isTrackLikelyPlayable(track) {",
+    "function getTrackPlaybackFailure(trackOrKey) {",
+    "track playability extraction",
+)
+
+replace_once(
+    '''function setupListenAlongJoinDataChannel(channel) {
+  listenAlongRtc.joinDataChannel = channel;
+  channel.onmessage = (event) => {
+    try {
+      const payload = JSON.parse(String(event.data || ""));
+      if (payload?.type === "snapshot") {
+        applyJoinedListenAlongSnapshot(payload, {
+          initial: !listenAlongRtc.latestSnapshot
+        });
+      }
+    } catch {
+      // Ignore malformed session messages.
+    }
+  };
+  channel.onopen = () => {
+    clearListenAlongJoinTimeout();
+  };
+''',
+    '''function setupListenAlongJoinDataChannel(channel) {
+  listenAlongRtc.joinDataChannel = channel;
+  channel.onmessage = (event) => {
+    try {
+      const payload = JSON.parse(String(event.data || ""));
+      if (payload?.type === "snapshot") {
+        applyJoinedListenAlongSnapshot(payload, {
+          initial: !listenAlongRtc.latestSnapshot
+        });
+      }
+    } catch {
+      // Ignore malformed session messages.
+    }
+  };
+  channel.onopen = () => {
+    clearListenAlongJoinTimeout();
+    joinedListenAlongPolling.stop();
+  };
+''',
+    "listener data-channel polling handoff",
+)
+
+replace_once(
+    '''function getListenAlongCaptureStream() {
+  if (typeof audioPlayer.captureStream === "function") {
+    return audioPlayer.captureStream();
+  }
+
+  if (typeof audioPlayer.mozCaptureStream === "function") {
+    return audioPlayer.mozCaptureStream();
+  }
+
+  throw new Error("This build cannot capture playback audio for listen along.");
+}
+''',
+    '''function getListenAlongCaptureStream() {
+  const sourceElement = getActiveAudioElement();
+  if (typeof sourceElement?.captureStream === "function") {
+    return sourceElement.captureStream();
+  }
+
+  if (typeof sourceElement?.mozCaptureStream === "function") {
+    return sourceElement.mozCaptureStream();
+  }
+
+  throw new Error("This build cannot capture playback audio for listen along.");
+}
+''',
+    "active playback deck capture",
+)
+
+replace_once(
+    '''function stopJoinedListenAlongSession() {
+  void resetJoinedListenAlongPeer({
+''',
+    '''function stopJoinedListenAlongSession() {
+  joinedListenAlongPolling.stop();
+  void resetJoinedListenAlongPeer({
+''',
+    "polling shutdown",
+)
+
+replace_once(
+    '''function startJoinedListenAlongPolling(sessionId, { sessionToken = "", peerCandidates = [], peerBaseUrl = "" } = {}) {
+  stopJoinedListenAlongSession();
+  listenAlongState.joinedSessionId = sessionId;
+  listenAlongState.joinedSessionToken = sessionToken;
+  listenAlongState.joinedPeerBaseUrl = peerBaseUrl;
+  listenAlongState.joinedPeerCandidates = [...peerCandidates];
+  listenAlongState.pollHandle = window.setInterval(() => {
+    void refreshJoinedListenAlongSession();
+  }, DISCORD_LISTEN_SESSION_POLL_MS);
+}
+''',
+    '''function startJoinedListenAlongPolling(sessionId, { sessionToken = "", peerCandidates = [], peerBaseUrl = "" } = {}) {
+  joinedListenAlongPolling.stop();
+  listenAlongState.joinedSessionId = sessionId;
+  listenAlongState.joinedSessionToken = sessionToken;
+  listenAlongState.joinedPeerBaseUrl = peerBaseUrl;
+  listenAlongState.joinedPeerCandidates = [...peerCandidates];
+  joinedListenAlongPolling.start();
+}
+''',
+    "fallback polling start",
+)
+
+replace_once(
+    '''  listenAlongRtc.pendingJoinTimeoutHandle = window.setTimeout(() => {
+    if (!listenAlongRtc.joinDataChannel && listenAlongState.joinedSessionId === sessionId) {
+      state.message = "Direct peer connect timed out. Falling back to session sync.";
+      renderStatus();
+      void refreshJoinedListenAlongSession().catch(() => {});
+    }
+  }, 15000);
+''',
+    '''  listenAlongRtc.pendingJoinTimeoutHandle = window.setTimeout(() => {
+    if (!listenAlongRtc.joinDataChannel && listenAlongState.joinedSessionId === sessionId) {
+      state.message = "Direct peer connect timed out. Falling back to session sync.";
+      renderStatus();
+      startJoinedListenAlongPolling(sessionId, {
+        sessionToken,
+        peerCandidates,
+        peerBaseUrl: listenAlongState.joinedPeerBaseUrl
+      });
+    }
+  }, 15000);
+''',
+    "fallback timeout lifecycle",
+)
+
+for function_name in (
+    "buildTrackKey",
+    "normaliseProviderIds",
+    "normaliseMetadataText",
+    "normaliseTrackArtists",
+    "normaliseTrackNumberTag",
+    "normaliseTrackReleaseDate",
+    "normaliseTrackExplicitFlag",
+    "buildTrackMetadataSnapshot",
+    "getTrackNormalizedDuration",
+    "getTrackNormalizedText",
+    "hasMatchingProviderIds",
+    "hasMatchingNormalizedMetadata",
+    "areTracksEquivalent",
+    "isGenericAlbumName",
+    "isTrackLikelyPlayable",
+):
+    if f"function {function_name}(" in source:
+        raise SystemExit(f"duplicate renderer function remains: {function_name}")
+
+if "listenAlongState.pollHandle" in source or "pollHandle:" in source:
+    raise SystemExit("legacy listen-along poll handle remains")
+
+if "const sourceElement = getActiveAudioElement();" not in source:
+    raise SystemExit("listen-along is not capturing the active playback deck")
+
+renderer_path.write_text(source, encoding="utf-8")
+print(f"renderer.js is now {len(source.encode('utf-8'))} bytes")
