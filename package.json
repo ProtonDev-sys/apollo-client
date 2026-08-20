@@ -7,8 +7,9 @@
     "preinstall": "node scripts/check-engines.js",
     "start": "electron .",
     "check:syntax": "node scripts/check-syntax.js",
+    "test": "node --test",
     "audit:deps": "npm audit --omit=dev",
-    "verify": "npm run check:syntax && npm run audit:deps",
+    "verify": "npm run check:syntax && npm test && npm run audit:deps",
     "build:discord-social-helper": "scripts\\build-discord-social-helper.cmd",
     "build:win": "npm run build:discord-social-helper && electron-builder --win nsis"
   },
