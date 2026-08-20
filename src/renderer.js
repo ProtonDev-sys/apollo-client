@@ -146,7 +146,6 @@ const listenAlongState = {
   joinedTrackId: "",
   joinedPeerBaseUrl: "",
   joinedPeerCandidates: [],
-  pollInFlight: false
 };
 let listenAlongAutomaticExposureConsent = false;
 let hasPromptedListenAlongAutomaticExposure = false;
@@ -169,7 +168,7 @@ const listenAlongRtc = {
 };
 const joinedListenAlongPolling = createPollingController({
   intervalMs: DISCORD_LISTEN_SESSION_POLL_MS,
-  task: () => refreshJoinedListenAlongSession(),
+  task: ({ isCurrent }) => refreshJoinedListenAlongSession({ isCurrent }),
   setIntervalFn: (callback, intervalMs) => window.setInterval(callback, intervalMs),
   clearIntervalFn: (handle) => window.clearInterval(handle),
   onError: (error) => {
@@ -6513,7 +6512,6 @@ function stopJoinedListenAlongSession() {
   listenAlongState.joinedTrackId = "";
   listenAlongState.joinedPeerBaseUrl = "";
   listenAlongState.joinedPeerCandidates = [];
-  listenAlongState.pollInFlight = false;
   listenAlongRtc.joinPeerId = "";
 }
 
@@ -6522,6 +6520,7 @@ async function leaveJoinedListenAlongSession() {
     return false;
   }
 
+  joinedListenAlongPolling.stop();
   await resetJoinedListenAlongPeer({
     keepRoom: false
   });
@@ -6864,13 +6863,18 @@ function createListenAlongTrack(session, sessionId = "") {
   });
 }
 
-async function applyListenAlongSessionSnapshot(session, { initial = false, sessionId = "" } = {}) {
+async function applyListenAlongSessionSnapshot(
+  session,
+  { initial = false, sessionId = "", isCurrent = () => true } = {}
+) {
+  const resolvedSessionId = String(sessionId || listenAlongState.joinedSessionId || "").trim();
+  const canApply = () => isJoinedListenAlongRefreshCurrent(resolvedSessionId, isCurrent);
   const sessionTrackId = String(session?.trackId || "").trim();
-  if (!sessionTrackId) {
+  if (!sessionTrackId || !canApply()) {
     return false;
   }
 
-  const track = createListenAlongTrack(session, sessionId);
+  const track = createListenAlongTrack(session, resolvedSessionId);
   const currentTrack = getPlaybackTrack();
   const currentTrackId = getListenAlongComparableTrackId(currentTrack);
   const needsTrackChange = currentTrackId !== sessionTrackId;
@@ -6880,9 +6884,13 @@ async function applyListenAlongSessionSnapshot(session, { initial = false, sessi
       queueTracks: [track],
       preserveListenAlong: true
     });
-    if (!didStartPlayback) {
+    if (!didStartPlayback || !canApply()) {
       return false;
     }
+  }
+
+  if (!canApply()) {
+    return false;
   }
 
   const playback = {
@@ -6891,11 +6899,18 @@ async function applyListenAlongSessionSnapshot(session, { initial = false, sessi
     capturedAt: Math.max(0, Number(session.capturedAt) || 0),
     playbackRate: clampNumber(session.playbackRate, 0.25, 4, 1)
   };
-  const duration = audioPlayer.duration || getCachedDuration(track) || Number(session.durationSeconds) || Number.MAX_SAFE_INTEGER;
+  const duration = audioPlayer.duration
+    || getCachedDuration(track)
+    || Number(session.durationSeconds)
+    || Number.MAX_SAFE_INTEGER;
   const targetTime = clampNumber(getListenAlongStartTime(playback), 0, duration, 0);
   const driftSeconds = Math.abs((audioPlayer.currentTime || 0) - targetTime);
   if (needsTrackChange || driftSeconds > DISCORD_LISTEN_SESSION_RESYNC_THRESHOLD_SECONDS) {
     audioPlayer.currentTime = targetTime;
+  }
+
+  if (!canApply()) {
+    return false;
   }
 
   if (playback.status === "playing") {
@@ -6904,8 +6919,16 @@ async function applyListenAlongSessionSnapshot(session, { initial = false, sessi
     } catch {
       // Ignore autoplay/promise failures and keep the joined session active.
     }
+
+    if (!canApply()) {
+      return false;
+    }
   } else {
     audioPlayer.pause();
+  }
+
+  if (!canApply()) {
+    return false;
   }
 
   listenAlongState.joinedTrackId = sessionTrackId;
@@ -6920,42 +6943,68 @@ async function applyListenAlongSessionSnapshot(session, { initial = false, sessi
   return true;
 }
 
-async function refreshJoinedListenAlongSession() {
-  if (!listenAlongState.joinedSessionId || listenAlongState.pollInFlight) {
-    return;
+function isJoinedListenAlongRefreshCurrent(sessionId, isCurrent = () => true) {
+  return Boolean(
+    sessionId
+    && typeof isCurrent === "function"
+    && isCurrent()
+    && listenAlongState.joinedSessionId === sessionId
+    && listenAlongRtc.joinDataChannel?.readyState !== "open"
+  );
+}
+
+async function refreshJoinedListenAlongSession({ isCurrent = () => true } = {}) {
+  const sessionId = String(listenAlongState.joinedSessionId || "").trim();
+  const sessionToken = String(listenAlongState.joinedSessionToken || "").trim();
+  const peerCandidates = Array.isArray(listenAlongState.joinedPeerCandidates)
+    ? [...listenAlongState.joinedPeerCandidates]
+    : [];
+  const preferredPeerBaseUrl = String(listenAlongState.joinedPeerBaseUrl || "").trim();
+  const refreshIsCurrent = () => isJoinedListenAlongRefreshCurrent(sessionId, isCurrent);
+
+  if (!refreshIsCurrent()) {
+    return false;
   }
 
-  listenAlongState.pollInFlight = true;
-
   try {
-    const { session, peerBaseUrl } = await fetchListenAlongSession(listenAlongState.joinedSessionId, {
-      sessionToken: listenAlongState.joinedSessionToken,
-      peerCandidates: listenAlongState.joinedPeerCandidates,
-      preferredPeerBaseUrl: listenAlongState.joinedPeerBaseUrl
+    const { session, peerBaseUrl } = await fetchListenAlongSession(sessionId, {
+      sessionToken,
+      peerCandidates,
+      preferredPeerBaseUrl
     });
+
+    if (!refreshIsCurrent()) {
+      return false;
+    }
+
     if (peerBaseUrl) {
       listenAlongState.joinedPeerBaseUrl = peerBaseUrl;
     }
 
     if (!session?.trackId) {
       stopJoinedListenAlongSession();
-      return;
+      return false;
     }
 
-    await applyListenAlongSessionSnapshot(session, {
-      sessionId: listenAlongState.joinedSessionId
+    return applyListenAlongSessionSnapshot(session, {
+      sessionId,
+      isCurrent
     });
   } catch (error) {
+    if (!refreshIsCurrent()) {
+      return false;
+    }
+
     if (/404/i.test(String(error?.message || ""))) {
       stopJoinedListenAlongSession();
       state.message = "The listen along session ended.";
       renderStatus();
-    } else if (!listenAlongState.joinedPeerBaseUrl && !listenAlongState.joinedPeerCandidates.length) {
+    } else if (!preferredPeerBaseUrl && !peerCandidates.length) {
       state.message = "This listen along link is missing peer connection details.";
       renderStatus();
     }
-  } finally {
-    listenAlongState.pollInFlight = false;
+
+    return false;
   }
 }
 
@@ -7001,6 +7050,7 @@ async function joinApolloListenAlong(track, playback, { sessionId = "", sessionT
     return;
   }
 
+  joinedListenAlongPolling.stop();
   await resetJoinedListenAlongPeer({
     keepRoom: false
   });
@@ -7013,7 +7063,7 @@ async function joinApolloListenAlong(track, playback, { sessionId = "", sessionT
     type: "join-request",
     senderId: listenAlongRtc.joinPeerId
   });
-  void refreshJoinedListenAlongSession().catch(() => {});
+  void joinedListenAlongPolling.run();
 
   clearListenAlongJoinTimeout();
   listenAlongRtc.pendingJoinTimeoutHandle = window.setTimeout(() => {
