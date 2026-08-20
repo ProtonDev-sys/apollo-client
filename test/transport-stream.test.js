@@ -73,9 +73,31 @@ test("event-stream requests send auth, client headers, and progressive events", 
   assert.equal(events[0].event, "snapshot");
   assert.equal(events[1].event, "done");
   assert.equal(lastEvent.data.remote.items.length, 2);
+  assert.equal(lastEvent.done, true);
   assert.equal(requests[0].options.headers.get("Accept"), "text/event-stream");
   assert.equal(requests[0].options.headers.get("Authorization"), "Bearer token");
   assert.equal(requests[0].options.headers.get("X-Client-Id"), "client-one");
+});
+
+test("event-stream transport rejects an incomplete stream instead of caching a partial result", async (context) => {
+  const { createApolloTransport } = await importTransport();
+  const originalFetch = global.fetch;
+  context.after(() => {
+    global.fetch = originalFetch;
+  });
+
+  global.fetch = async () => streamResponse([
+    'event: snapshot\ndata: {"remote":{"items":[{"id":"partial"}],"progress":{"complete":false}}}\n\n'
+  ]);
+
+  const events = [];
+  const requestJson = createTransport(createApolloTransport);
+  await assert.rejects(
+    requestJson.requestEventStream("/api/search?stream=1", {}, (event) => events.push(event)),
+    (error) => error?.code === "APOLLO_INCOMPLETE_STREAM"
+  );
+  assert.equal(events.length, 1);
+  assert.equal(events[0].event, "snapshot");
 });
 
 test("event-stream transport accepts JSON from older servers as one done event", async (context) => {
@@ -104,6 +126,7 @@ test("event-stream transport accepts JSON from older servers as one done event",
 
   assert.equal(events.length, 1);
   assert.equal(event.event, "done");
+  assert.equal(event.done, true);
   assert.deepEqual(event.data.remote.items, [{ id: "one" }]);
 });
 
