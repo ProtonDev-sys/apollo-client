@@ -85,7 +85,6 @@ jobs:
       - name: Build and validate the pruned application
         shell: bash
         run: |
-          mkdir -p native-bin
           npm run pack:linux:ci
           npm run check:package
       - name: Exercise packaged hardware and software rendering
@@ -158,9 +157,7 @@ jobs:
       - name: Build the pruned English-only installer
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force native-bin | Out-Null
-          npm run build:app
-          npx electron-builder --win nsis --publish never
+          npm run pack:win:ci
           npm run check:package
       - name: Exercise packaged hardware and software rendering
         shell: pwsh
@@ -183,24 +180,16 @@ jobs:
       - name: Create and exercise the portable archive
         shell: pwsh
         run: |
+          node scripts/build-windows-portable.js
           $sevenZip = (Get-Command 7z.exe -ErrorAction Stop).Source
-          $version = (Get-Content package.json | ConvertFrom-Json).version
-          $releaseDirectory = (Resolve-Path release).Path
-          $archive = Join-Path $releaseDirectory "Apollo-Client-Portable-$version.7z"
-
-          Push-Location release/win-unpacked
-          try {
-            & $sevenZip a -t7z -mx=9 -m0=lzma2 -ms=on $archive '.\*'
-            if ($LASTEXITCODE -ne 0) {
-              throw "7-Zip exited with code $LASTEXITCODE."
-            }
-          } finally {
-            Pop-Location
+          $archive = Get-ChildItem release -Filter 'Apollo-Client-Portable-*.7z' | Select-Object -First 1
+          if (-not $archive) {
+            throw 'Windows portable archive was not generated.'
           }
 
           $extractDirectory = Join-Path $env:RUNNER_TEMP 'apollo-portable-extracted'
           Remove-Item $extractDirectory -Recurse -Force -ErrorAction SilentlyContinue
-          & $sevenZip x $archive "-o$extractDirectory" -y
+          & $sevenZip x $archive.FullName "-o$extractDirectory" -y
           if ($LASTEXITCODE -ne 0) {
             throw "Portable archive extraction exited with code $LASTEXITCODE."
           }
@@ -231,7 +220,7 @@ jobs:
           }
 
           $maxInstallerBytes = 96000000
-          $maxPortableBytes = 96000000
+          $maxPortableBytes = 78000000
           if ($installer.Length -gt $maxInstallerBytes) {
             throw "Windows installer exceeds the $maxInstallerBytes-byte budget: $($installer.Length) bytes."
           }
