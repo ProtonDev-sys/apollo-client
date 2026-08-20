@@ -207,10 +207,10 @@ async function run() {
   assert.equal(keyboardSnapshot.closed, true);
   assert.equal(keyboardSnapshot.reopened, true);
 
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  const focusSnapshot = await window.webContents.executeJavaScript(
+  const focusSnapshot = await waitForCondition(
+    window,
     `document.activeElement?.classList.contains("apollo-command-search") || false`,
-    true
+    5000
   );
   assert.equal(Boolean(keyboardSnapshot.searchFocused || focusSnapshot), true);
 
