@@ -1,9 +1,9 @@
 name: Audit source snapshot
 
 on:
-  push:
+  pull_request:
     branches:
-      - codex/continuous-audit-20260820
+      - main
 
 permissions:
   contents: read
