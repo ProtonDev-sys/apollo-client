@@ -118,45 +118,8 @@ jobs:
           mqtt_test_path = Path("test/mqtt-websocket.test.js")
           mqtt_test = mqtt_test_path.read_text(encoding="utf-8")
           mqtt_test = mqtt_test.replace(
-              "function connectClient(options = {}) {",
-              "async function connectClient(options = {}) {",
-              1,
-          )
-          connack = '''  socket.message(Buffer.from([0x20, 0x02, 0x00, 0x00]));
-          return { client, socket };
-          '''
-          connack_async = '''  socket.message(Buffer.from([0x20, 0x02, 0x00, 0x00]));
-          await client.dataQueue;
-          return { client, socket };
-          '''
-          if mqtt_test.count(connack) != 1:
-              raise SystemExit("native signaling connect fixture was not unique")
-          mqtt_test = mqtt_test.replace(connack, connack_async, 1)
-          mqtt_test = mqtt_test.replace("= connectClient(", "= await connectClient(")
-          mqtt_test = mqtt_test.replace(
-              'test("native adapter parses fragmented and coalesced packets", () => {',
-              'test("native adapter parses fragmented and coalesced packets", async () => {',
-              1,
-          )
-          mqtt_test = mqtt_test.replace(
-              '''  socket.message(Buffer.from([0x00, 0x00]));
-              assert.equal(client.connected, true);
-              ''',
-              '''  socket.message(Buffer.from([0x00, 0x00]));
-              await client.dataQueue;
-              assert.equal(client.connected, true);
-              ''',
-              1,
-          )
-          mqtt_test = mqtt_test.replace(
-              '''  socket.message(Buffer.concat([first, second]));
-              assert.deepEqual(messages, [["a", "1"], ["b", "2"]]);
-              ''',
-              '''  socket.message(Buffer.concat([first, second]));
-              await client.dataQueue;
-              assert.deepEqual(messages, [["a", "1"], ["b", "2"]]);
-              ''',
-              1,
+              "const { client, socket } = connectClient();",
+              "const { client, socket } = await connectClient();",
           )
           mqtt_test_path.write_text(mqtt_test, encoding="utf-8")
           PY
