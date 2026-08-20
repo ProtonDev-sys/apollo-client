@@ -173,7 +173,7 @@ jobs:
           if (-not $installer) {
             throw 'Windows installer was not generated.'
           }
-          $maxBytes = 110000000
+          $maxBytes = 96000000
           if ($installer.Length -gt $maxBytes) {
             throw "Windows installer exceeds the $maxBytes-byte budget: $($installer.Length) bytes."
           }
