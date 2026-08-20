@@ -27,6 +27,11 @@ function normaliseLyricsPayload(payload, provider) {
   };
 }
 
+function removePluginRegistrations(items, pluginId) {
+  const retainedItems = items.filter((entry) => entry.pluginId !== pluginId);
+  items.splice(0, items.length, ...retainedItems);
+}
+
 export function createPluginHost(sharedApi) {
   const plugins = [];
   const detailTabs = [];
@@ -72,6 +77,28 @@ export function createPluginHost(sharedApi) {
   function ensureUniqueRegistration(items, id, description) {
     if (items.some((entry) => entry.id === id)) {
       throw new Error(`${description} "${id}" is already registered.`);
+    }
+  }
+
+  function removePluginContributions(pluginId) {
+    removePluginRegistrations(detailTabs, pluginId);
+    removePluginRegistrations(lyricsProviders, pluginId);
+  }
+
+  function disposePlugin(pluginId) {
+    try {
+      pluginDisposers.get(pluginId)?.();
+    } catch {
+      // Ignore plugin cleanup failures so the remaining host can still shut down.
+    }
+
+    pluginDisposers.delete(pluginId);
+    pluginApis.delete(pluginId);
+    removePluginContributions(pluginId);
+
+    const pluginIndex = plugins.findIndex((plugin) => plugin.id === pluginId);
+    if (pluginIndex >= 0) {
+      plugins.splice(pluginIndex, 1);
     }
   }
 
@@ -162,9 +189,7 @@ export function createPluginHost(sharedApi) {
           name: plugin.name || plugin.id
         });
       } catch (error) {
-        pluginDisposers.get(plugin.id)?.();
-        pluginDisposers.delete(plugin.id);
-        pluginApis.delete(plugin.id);
+        disposePlugin(plugin.id);
         console.warn(`[apollo-plugin-host] failed to load plugin "${plugin.id}"`, error);
       }
     }
@@ -256,8 +281,8 @@ export function createPluginHost(sharedApi) {
   }
 
   function dispose() {
-    for (const disposer of pluginDisposers.values()) {
-      disposer();
+    for (const pluginId of [...pluginDisposers.keys()]) {
+      disposePlugin(pluginId);
     }
 
     plugins.length = 0;
@@ -273,6 +298,7 @@ export function createPluginHost(sharedApi) {
     getPlugins,
     loadPlugins,
     mountDetailTab,
+    resolveLyrics,
     dispose,
     emit,
     on: subscribe,

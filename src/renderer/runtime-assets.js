@@ -1,4 +1,7 @@
+import interfacePlugin from "../plugins/interface-plugin.js";
+
 const appliedThemeVariableNames = new WeakMap();
+const BUILT_IN_PLUGIN_MODULES = [interfacePlugin];
 
 function resolveThemeStyleElement(documentRef) {
   return documentRef.querySelector("#apollo-theme-style");
@@ -65,8 +68,10 @@ export async function loadRuntimePluginModules({
   logClient,
   buildImportUrl = buildPluginImportUrl
 }) {
+  const modules = [...BUILT_IN_PLUGIN_MODULES];
+
   if (!runtimeAssets?.getPlugins) {
-    return [];
+    return modules;
   }
 
   let pluginEntries = [];
@@ -76,10 +81,9 @@ export async function loadRuntimePluginModules({
     logClient?.("plugins", "runtime plugin discovery failed", {
       error: error?.message || "unknown"
     });
-    return [];
+    return modules;
   }
 
-  const modules = [];
   for (const pluginEntry of Array.isArray(pluginEntries) ? pluginEntries : []) {
     try {
       const importUrl = buildImportUrl(pluginEntry);
@@ -90,6 +94,17 @@ export async function loadRuntimePluginModules({
       const pluginModule = await import(importUrl);
       if (!pluginModule?.default) {
         logClient?.("plugins", "plugin module missing default export", {
+          path: pluginEntry.path
+        });
+        continue;
+      }
+
+      if (
+        pluginModule.default.id
+        && modules.some((existingPlugin) => existingPlugin?.id === pluginModule.default.id)
+      ) {
+        logClient?.("plugins", "duplicate plugin module ignored", {
+          id: pluginModule.default.id,
           path: pluginEntry.path
         });
         continue;
