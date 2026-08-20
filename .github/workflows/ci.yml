@@ -31,6 +31,7 @@ jobs:
         run: |
           node scripts/apply-electron-only-compact.mjs
           python3 - <<'PY'
+          import json
           from pathlib import Path
 
           preload_path = Path("preload.js")
@@ -61,6 +62,45 @@ jobs:
               )
               runtime_assets = runtime_assets[:header_start] + header + runtime_assets[header_end:]
               runtime_assets_path.write_text(runtime_assets, encoding="utf-8")
+
+          manifest_script = '''#!/usr/bin/env node
+
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const projectRoot = path.resolve(__dirname, "..");
+          const sourcePackage = JSON.parse(
+            fs.readFileSync(path.join(projectRoot, "package.json"), "utf8")
+          );
+          const outputDirectory = path.join(projectRoot, "dist-app");
+          const runtimeManifest = {
+            name: sourcePackage.name,
+            version: sourcePackage.version,
+            description: sourcePackage.description,
+            main: "main.js",
+            author: sourcePackage.author,
+            license: sourcePackage.license,
+            private: true
+          };
+
+          fs.mkdirSync(outputDirectory, { recursive: true });
+          fs.writeFileSync(
+            path.join(outputDirectory, "package.json"),
+            `${JSON.stringify(runtimeManifest)}\n`
+          );
+          '''
+          manifest_path = Path("scripts/write-runtime-manifest.js")
+          manifest_path.write_text(
+              "\n".join(line[10:] if line.startswith("          ") else line for line in manifest_script.splitlines()) + "\n",
+              encoding="utf-8",
+          )
+
+          package_path = Path("package.json")
+          package_json = json.loads(package_path.read_text(encoding="utf-8"))
+          package_json["scripts"]["build:app"] = (
+              "node scripts/build-app.js && node scripts/write-runtime-manifest.js"
+          )
+          package_path.write_text(json.dumps(package_json, indent=2) + "\n", encoding="utf-8")
           PY
       - name: Refresh dependency lock
         run: npm install --package-lock-only --ignore-scripts
