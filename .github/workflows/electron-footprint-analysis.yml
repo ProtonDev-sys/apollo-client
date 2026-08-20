@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - codex/electron-size-pass-20260820
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
