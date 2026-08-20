@@ -14,6 +14,7 @@ test("renderer delegates indexed search and bounded cache policy", () => {
 
   assert.match(source, /from "\.\/renderer\/search-index\.js";/);
   assert.match(source, /const localTrackSearch = createTrackSearchEngine\(/);
+  assert.match(source, /maxIndexes: 8/);
   assert.match(source, /const searchResultCache = createTimedLruCache\(/);
   assert.match(source, /const artistSearchCache = createTimedLruCache\(/);
   assert.match(source, /localTrackSearch\.search\(collection\.tracks, trimmedQuery,/);
@@ -23,6 +24,15 @@ test("renderer delegates indexed search and bounded cache policy", () => {
   assert.doesNotMatch(source, /function matchesTrackQuery\(/);
   assert.doesNotMatch(source, /const searchResultCache = new Map\(\);/);
   assert.doesNotMatch(source, /const artistSearchCache = new Map\(\);/);
+});
+
+test("collection filtering remains available when global library results are disabled", () => {
+  const source = readRenderer();
+
+  assert.match(
+    source,
+    /!state\.settings\.search\.includeLibraryResults && !isCollectionScopedSearch\(\)/
+  );
 });
 
 test("one-character searches remain local", () => {
