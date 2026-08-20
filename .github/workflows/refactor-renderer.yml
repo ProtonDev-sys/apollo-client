@@ -4,6 +4,13 @@ on:
   push:
     branches:
       - codex/renderer-foundation-20260820
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: renderer-foundation-refactor
+  cancel-in-progress: true
 
 permissions:
   contents: write
