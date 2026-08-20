@@ -54,7 +54,7 @@ function packetIdFrom(packet) {
   return packet.readUInt16BE(cursor);
 }
 
-function connectClient(options = {}) {
+async function connectClient(options = {}) {
   FakeWebSocket.instances.length = 0;
   const mqtt = createMqttWebSocketAdapter({ WebSocketImpl: FakeWebSocket });
   const client = mqtt.connect("wss://broker.example/mqtt", {
@@ -68,11 +68,12 @@ function connectClient(options = {}) {
   assert.equal(socket.protocol, "mqtt");
   assert.equal(socket.sent[0][0], 0x10);
   socket.message(Buffer.from([0x20, 0x02, 0x00, 0x00]));
+  await client.dataQueue;
   return { client, socket };
 }
 
 test("native adapter connects, subscribes, publishes, receives, and unsubscribes", async () => {
-  const { client, socket } = connectClient();
+  const { client, socket } = await connectClient();
   assert.equal(client.connected, true);
 
   const subscribed = new Promise((resolve, reject) => {
@@ -113,7 +114,7 @@ test("native adapter connects, subscribes, publishes, receives, and unsubscribes
   assert.equal(client.connected, false);
 });
 
-test("native adapter parses fragmented and coalesced packets", () => {
+test("native adapter parses fragmented and coalesced packets", async () => {
   FakeWebSocket.instances.length = 0;
   const mqtt = createMqttWebSocketAdapter({ WebSocketImpl: FakeWebSocket });
   const client = mqtt.connect("wss://broker.example/mqtt", {
@@ -125,8 +126,10 @@ test("native adapter parses fragmented and coalesced packets", () => {
   socket.open();
 
   socket.message(Buffer.from([0x20, 0x02]));
+  await client.dataQueue;
   assert.equal(client.connected, false);
   socket.message(Buffer.from([0x00, 0x00]));
+  await client.dataQueue;
   assert.equal(client.connected, true);
 
   const messages = [];
@@ -134,12 +137,13 @@ test("native adapter parses fragmented and coalesced packets", () => {
   const first = createPacket(0x30, Buffer.concat([encodeUtf8String("a"), Buffer.from("1")]));
   const second = createPacket(0x30, Buffer.concat([encodeUtf8String("b"), Buffer.from("2")]));
   socket.message(Buffer.concat([first, second]));
+  await client.dataQueue;
   assert.deepEqual(messages, [["a", "1"], ["b", "2"]]);
   client.end(true);
 });
 
 test("native adapter closes oversized streams without retaining data", async () => {
-  const { client, socket } = connectClient({ maxPacketBytes: 1024 });
+  const { client, socket } = await connectClient({ maxPacketBytes: 1024 });
   const error = new Promise((resolve) => client.once("error", resolve));
   socket.message(Buffer.from([0x30, 0xff, 0xff, 0x7f]));
   assert.match((await error).message, /size limit/);
@@ -147,9 +151,8 @@ test("native adapter closes oversized streams without retaining data", async () 
   client.end(true);
 });
 
-
 test("native adapter does not retain acknowledgements when a send fails", async () => {
-  const { client, socket } = connectClient();
+  const { client, socket } = await connectClient();
   socket.failSend = true;
   const error = await new Promise((resolve) => {
     client.subscribe("apollo/fail", (failure) => resolve(failure));
@@ -161,7 +164,7 @@ test("native adapter does not retain acknowledgements when a send fails", async 
 });
 
 test("native adapter bounds acknowledgement memory and expires missing acknowledgements", async () => {
-  const { client } = connectClient({
+  const { client } = await connectClient({
     ackTimeout: 15,
     maxPendingAcks: 2
   });
