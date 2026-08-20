@@ -82,12 +82,29 @@ jobs:
         run: npm ci
       - name: Install the Electron binary
         run: env -u ELECTRON_SKIP_BINARY_DOWNLOAD npm rebuild electron
-      - name: Build and validate the unpacked application
+      - name: Build and validate the pruned application
         shell: bash
         run: |
           mkdir -p native-bin
           npm run pack:linux:ci
           npm run check:package
+      - name: Exercise the packaged software-rendering path
+        shell: bash
+        run: |
+          set -euo pipefail
+          executable=$(find release/linux-unpacked -maxdepth 1 -type f -perm -111 ! -name 'chrome-sandbox' ! -name 'chrome_crashpad_handler' | head -n 1)
+          test -n "$executable"
+          xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' bash -c '
+            set -e
+            app="$1"
+            user_data="$2"
+            "$app" --no-sandbox --disable-gpu --user-data-dir="$user_data" >"$user_data.log" 2>&1 &
+            pid=$!
+            sleep 8
+            kill -0 "$pid"
+            kill "$pid" || true
+            wait "$pid" || true
+          ' _ "$executable" "$RUNNER_TEMP/apollo-packaged-user"
       - name: Report package sizes
         shell: bash
         run: |
@@ -128,12 +145,27 @@ jobs:
         run: |
           Remove-Item Env:ELECTRON_SKIP_BINARY_DOWNLOAD -ErrorAction SilentlyContinue
           npm rebuild electron
-      - name: Build the English-only installer
+      - name: Build the pruned English-only installer
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force native-bin | Out-Null
           npm run build:app
           npx electron-builder --win nsis --publish never
+          npm run check:package
+      - name: Exercise the packaged software-rendering path
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path 'release/win-unpacked/Apollo Client.exe').Path
+          $userData = Join-Path $env:RUNNER_TEMP 'apollo-packaged-user'
+          $process = Start-Process $exe -ArgumentList @(
+            '--disable-gpu',
+            "--user-data-dir=$userData"
+          ) -PassThru
+          Start-Sleep -Seconds 8
+          if ($process.HasExited) {
+            throw 'The pruned Windows application exited during packaged smoke testing.'
+          }
+          & taskkill.exe /PID $process.Id /T /F | Out-Null
       - name: Enforce and report installer size
         shell: pwsh
         run: |
@@ -141,16 +173,19 @@ jobs:
           if (-not $installer) {
             throw 'Windows installer was not generated.'
           }
-          $maxBytes = 125829120
+          $maxBytes = 110000000
           if ($installer.Length -gt $maxBytes) {
             throw "Windows installer exceeds the $maxBytes-byte budget: $($installer.Length) bytes."
           }
+          $unpackedBytes = (Get-ChildItem release/win-unpacked -Recurse -File | Measure-Object Length -Sum).Sum
           "Windows installer: $($installer.Length) bytes"
+          "Windows unpacked runtime: $unpackedBytes bytes"
           @(
             '### Windows package size',
             '',
             "- installer: $($installer.Length) bytes",
-            "- budget: $maxBytes bytes"
+            "- unpacked runtime: $unpackedBytes bytes",
+            "- installer budget: $maxBytes bytes"
           ) | Add-Content $env:GITHUB_STEP_SUMMARY
       - name: Upload Windows installer
         uses: actions/upload-artifact@v7
