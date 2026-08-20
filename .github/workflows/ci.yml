@@ -1,154 +1,96 @@
-name: Apply final reviewed Electron resource fixes
+name: CI
 
 on:
+  push:
+    branches:
+      - main
   pull_request:
 
 permissions:
   contents: read
 
 jobs:
-  apply-review-fixes:
-    name: Apply and validate final reviewed fixes
-    if: github.head_ref == 'codex/electron-resource-budget-20260820' && github.actor != 'github-actions[bot]'
+  verify:
+    name: Node ${{ matrix.node-version }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version:
+          - 20.x
+          - 22.x
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
     steps:
-      - name: Check out feature branch
+      - name: Check out repository
         uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
-          ref: codex/electron-resource-budget-20260820
-          fetch-depth: 0
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Verify Electron runtime boundary
+        run: npm run check:runtime
+      - name: Verify Electron resource budgets
+        run: npm run check:resources
+      - name: Check JavaScript syntax
+        run: npm run check:syntax
+      - name: Run tests
+        run: npm test
+      - name: Audit production dependencies
+        run: npm run audit:deps
+
+  ui-smoke:
+    name: Electron UI smoke
+    runs-on: ubuntu-latest
+    env:
+      ELECTRON_DISABLE_SECURITY_WARNINGS: "true"
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22.x
           cache: npm
-      - name: Apply reviewed hardening fixes
+      - name: Install dependencies with Electron
+        run: npm ci
+      - name: Render and exercise the client UI
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1440x900x24" npm run test:ui
+      - name: Upload rendered UI
+        uses: actions/upload-artifact@v4
+        with:
+          name: apollo-client-ui-smoke
+          path: test-results/apollo-client-ui.png
+          if-no-files-found: error
+          retention-days: 7
+
+  toolchain:
+    name: Electron audit and package smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - name: Install complete dependency tree
+        run: npm ci
+      - name: Audit complete dependency tree
+        run: npm run audit:all
+      - name: Prepare optional native resource directory
+        run: mkdir -p native-bin
+      - name: Build unpacked Linux application
+        run: npm run pack:linux:ci
+      - name: Verify packaged application structure and size
         shell: bash
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          patch_path = Path("scripts/apply-coderabbit-resource-fixes.py")
-          source = patch_path.read_text(encoding="utf-8")
-          replacements = (
-              (
-                  "resource_test = resource_test.rstrip() + '''",
-                  "resource_test = resource_test.rstrip() + r'''",
-              ),
-              (
-                  "    '''test(\"log text is exactly byte bounded without corrupting UTF-8\"",
-                  "    r'''test(\"log text is exactly byte bounded without corrupting UTF-8\"",
-              ),
-              (
-                  "mqtt_test = mqtt_test.rstrip() + '''",
-                  "mqtt_test = mqtt_test.rstrip() + r'''",
-              ),
-          )
-          for old, new in replacements:
-              if source.count(old) != 1:
-                  raise SystemExit(f"review patch escaping marker was not unique: {old}")
-              source = source.replace(old, new, 1)
-          patch_path.write_text(source, encoding="utf-8")
-          PY
-          python3 scripts/apply-coderabbit-resource-fixes.py
-          python3 - <<'PY'
-          from pathlib import Path
-
-          smoke_path = Path("scripts/electron-ui-smoke.js")
-          source = smoke_path.read_text(encoding="utf-8")
-          key_marker = '    keyCode: "K",'
-          end_marker = '  assert.equal(Boolean(focusSnapshot), true);\n'
-          key_index = source.find(key_marker)
-          if key_index < 0:
-              raise SystemExit("native command-shortcut key marker was not found")
-          start_index = source.rfind('  window.webContents.sendInputEvent({', 0, key_index)
-          if start_index < 0:
-              raise SystemExit("native command-shortcut start boundary was not found")
-          end_index = source.index(end_marker, key_index) + len(end_marker)
-          replacement = '''  const commandShortcutCondition = `Boolean(
-            document.querySelector(".apollo-command-layer")?.classList.contains("is-open")
-            && document.activeElement?.classList.contains("apollo-command-search")
-          )`;
-          let focusSnapshot = false;
-          for (const keyCode of ["k", "K"]) {
-            window.focus();
-            window.webContents.focus();
-            window.webContents.sendInputEvent({
-              type: "keyDown",
-              keyCode,
-              modifiers: ["control"]
-            });
-            await new Promise((resolve) => setTimeout(resolve, 50));
-            window.webContents.sendInputEvent({
-              type: "keyUp",
-              keyCode,
-              modifiers: ["control"]
-            });
-
-            const deadline = Date.now() + 1500;
-            while (Date.now() < deadline) {
-              focusSnapshot = await window.webContents.executeJavaScript(
-                commandShortcutCondition,
-                true
-              ).catch(() => false);
-              if (focusSnapshot) {
-                break;
-              }
-              await new Promise((resolve) => setTimeout(resolve, 50));
-            }
-            if (focusSnapshot) {
-              break;
-            }
-          }
-
-          if (!focusSnapshot) {
-            focusSnapshot = await waitForCondition(window, commandShortcutCondition, 5000);
-          }
-          assert.equal(Boolean(focusSnapshot), true);
-          '''
-          smoke_path.write_text(
-              source[:start_index] + replacement + source[end_index:],
-              encoding="utf-8",
-          )
-
-          mqtt_test_path = Path("test/mqtt-websocket.test.js")
-          mqtt_test = mqtt_test_path.read_text(encoding="utf-8")
-          mqtt_test = mqtt_test.replace(
-              "const { client, socket } = connectClient();",
-              "const { client, socket } = await connectClient();",
-          )
-          mqtt_test_path.write_text(mqtt_test, encoding="utf-8")
-          PY
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-      - name: Validate reviewed fixes
-        run: |
-          npm run check:runtime
-          npm run check:resources
-          npm run check:syntax
-          npm test
-          npm run audit:deps
-          git diff --check
-      - name: Commit validated application files
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git rm -f scripts/apply-coderabbit-resource-fixes.py
-          git add \
-            scripts/check-package-budget.js \
-            scripts/check-resource-budget.js \
-            scripts/electron-ui-smoke.js \
-            src/main/async-log-writer.js \
-            src/renderer/resource-controls.js \
-            src/preload/mqtt-websocket.js \
-            test/resource-budget.test.js \
-            test/async-log-writer.test.js \
-            test/resource-controls.test.js \
-            test/mqtt-websocket.test.js
-          git commit -m "Harden Electron resource budgets and stream ordering"
-          git push origin HEAD:codex/electron-resource-budget-20260820
+          test -d release/linux-unpacked
+          test -f release/linux-unpacked/resources/app.asar
+          test -s release/linux-unpacked/resources/app.asar
+          npm run check:package
