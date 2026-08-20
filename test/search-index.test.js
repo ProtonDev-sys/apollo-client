@@ -18,20 +18,25 @@ function track(overrides = {}) {
     title: "Untitled",
     artist: "Unknown Artist",
     album: "",
+    provider: "library",
+    resultSource: "library",
     ...overrides
   };
 }
 
 test("search text normalization handles accents, punctuation, and short tokens", async () => {
-  const { normaliseSearchText } = await importSearchIndex();
+  const { normaliseSearchText, shouldSearchRemote, tokenizeSearchQuery } = await importSearchIndex();
 
   assert.equal(normaliseSearchText("  Beyoncé — Halo  "), "beyonce halo");
   assert.equal(normaliseSearchText("U2: One"), "u2 one");
+  assert.deepEqual(tokenizeSearchQuery("Halo halo Beyoncé"), ["halo", "beyonce"]);
+  assert.equal(shouldSearchRemote("a"), false);
+  assert.equal(shouldSearchRemote("u2"), true);
 });
 
-test("track search index ranks title and artist combinations above incidental matches", async () => {
-  const { createTrackSearchIndex } = await importSearchIndex();
-  const index = createTrackSearchIndex();
+test("collection search engine ranks title and artist combinations above incidental matches", async () => {
+  const { createTrackSearchEngine } = await importSearchIndex();
+  const engine = createTrackSearchEngine();
   const tracks = [
     track({
       key: "library:incidental",
@@ -56,15 +61,17 @@ test("track search index ranks title and artist combinations above incidental ma
     })
   ];
 
-  const result = index.search(tracks, "daft punk one more time");
+  const result = engine.search(tracks, "daft punk one more time", {
+    cacheKey: "library:1"
+  });
   assert.equal(result[0].id, "correct");
   assert.equal(result.length, 2);
-  assert.equal(index.getSize(), 3);
+  assert.equal(engine.getSize(), 1);
 });
 
-test("track search index reuses documents and refreshes changed metadata", async () => {
-  const { createTrackSearchIndex } = await importSearchIndex();
-  const index = createTrackSearchIndex();
+test("collection indexes support prefixes, infixes, limits, and revision refreshes", async () => {
+  const { createTrackSearchEngine } = await importSearchIndex();
+  const engine = createTrackSearchEngine({ maxIndexes: 2 });
   const original = track({
     key: "library:one",
     id: "one",
@@ -72,18 +79,48 @@ test("track search index reuses documents and refreshes changed metadata", async
     artist: "Artist"
   });
 
-  assert.deepEqual(index.search([original], "old name").map((item) => item.id), ["one"]);
-  assert.equal(index.getSize(), 1);
-  assert.deepEqual(index.search([original], "old name").map((item) => item.id), ["one"]);
-  assert.equal(index.getSize(), 1);
+  assert.deepEqual(
+    engine.search([original], "ol", { cacheKey: "library:1" }).map((item) => item.id),
+    ["one"]
+  );
+  assert.deepEqual(
+    engine.search([original], "ld na", { cacheKey: "library:1" }).map((item) => item.id),
+    ["one"]
+  );
 
   const updated = {
     ...original,
     title: "New Name"
   };
-  assert.deepEqual(index.search([updated], "old name"), []);
-  assert.deepEqual(index.search([updated], "new name").map((item) => item.id), ["one"]);
-  assert.equal(index.getSize(), 1);
+  assert.deepEqual(engine.search([updated], "old", { cacheKey: "library:2" }), []);
+  assert.deepEqual(
+    engine.search([updated], "new", { cacheKey: "library:2", limit: 1 }).map((item) => item.id),
+    ["one"]
+  );
+
+  engine.search([track({ id: "playlist", title: "Playlist Song" })], "song", {
+    cacheKey: "playlist:one:1"
+  });
+  assert.equal(engine.getSize(), 2);
+});
+
+test("local search result limits are applied after relevance ranking", async () => {
+  const { createTrackSearchEngine } = await importSearchIndex();
+  const engine = createTrackSearchEngine();
+  const tracks = Array.from({ length: 300 }, (_, index) => track({
+    id: `track-${index}`,
+    key: `library:${index}`,
+    title: index === 299 ? "Song" : `Song ${index}`,
+    artist: "Artist"
+  }));
+
+  const results = engine.search(tracks, "song", {
+    cacheKey: "library:1",
+    limit: 250
+  });
+
+  assert.equal(results.length, 250);
+  assert.equal(results[0].id, "track-299");
 });
 
 test("timed LRU cache expires entries and refreshes access order", async () => {
@@ -105,6 +142,19 @@ test("timed LRU cache expires entries and refreshes access order", async () => {
   now = 1101;
   assert.equal(cache.get("one"), null);
   assert.equal(cache.get("three"), null);
+});
+
+test("timed LRU cache clones values and supports non-expiring entries", async () => {
+  const { createTimedLruCache } = await importSearchIndex();
+  const cache = createTimedLruCache({ ttlMs: 0 });
+  const value = { nested: { count: 1 } };
+  cache.set("value", value);
+  value.nested.count = 2;
+
+  const cached = cache.get("value");
+  assert.equal(cached.nested.count, 1);
+  cached.nested.count = 3;
+  assert.equal(cache.get("value").nested.count, 1);
 });
 
 test("cache keys canonicalize query and provider ordering", async () => {
@@ -140,14 +190,16 @@ test("merged results keep local tracks and suppress equivalent remote duplicates
     id: "spotify-one",
     title: "One More Time",
     artist: "Daft Punk",
-    provider: "spotify"
+    provider: "spotify",
+    resultSource: "remote"
   });
   const remoteUnique = track({
     key: "spotify:two",
     id: "spotify-two",
     title: "Digital Love",
     artist: "Daft Punk",
-    provider: "spotify"
+    provider: "spotify",
+    resultSource: "remote"
   });
 
   const merged = mergeSearchTracks([local], [remoteDuplicate, remoteUnique], {
