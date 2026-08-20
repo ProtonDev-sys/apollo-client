@@ -428,6 +428,7 @@
         "builder-util"
       ],
       "effects": [
+        "app-builder-lib",
         "electron-builder"
       ],
       "range": "2.0.0 - 26.14.0",
@@ -998,9 +999,7 @@
         "app-builder-lib",
         "builder-util"
       ],
-      "effects": [
-        "app-builder-lib"
-      ],
+      "effects": [],
       "range": "19.28.0 - 26.14.0",
       "nodes": [
         "node_modules/electron-builder-squirrel-windows"
