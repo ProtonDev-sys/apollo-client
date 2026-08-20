@@ -35,3 +35,29 @@ jobs:
         run: npm run check:syntax
       - name: Run tests
         run: npm test
+
+  ui-smoke:
+    name: Electron UI smoke
+    runs-on: ubuntu-latest
+    env:
+      ELECTRON_DISABLE_SECURITY_WARNINGS: "true"
+      LIBGL_ALWAYS_SOFTWARE: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - name: Install dependencies with Electron
+        run: npm ci
+      - name: Render and exercise the client UI
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1440x900x24" npm run test:ui
+      - name: Upload rendered UI
+        uses: actions/upload-artifact@v4
+        with:
+          name: apollo-client-ui-smoke
+          path: test-results/apollo-client-ui.png
+          if-no-files-found: error
+          retention-days: 7
