@@ -101,6 +101,12 @@ jobs:
               "node scripts/build-app.js && node scripts/write-runtime-manifest.js"
           )
           package_path.write_text(json.dumps(package_json, indent=2) + "\n", encoding="utf-8")
+
+          gitignore_path = Path(".gitignore")
+          gitignore = gitignore_path.read_text(encoding="utf-8")
+          if "test-results/" not in gitignore.splitlines():
+              gitignore = gitignore.rstrip() + "\ntest-results/\n"
+              gitignore_path.write_text(gitignore, encoding="utf-8")
           PY
       - name: Refresh dependency lock
         run: npm install --package-lock-only --ignore-scripts
@@ -131,6 +137,8 @@ jobs:
           rm -f scripts/.electron-compact-transform.mjs
           git rm -f scripts/apply-electron-only-compact.mjs
           git rm -rf scripts/.electron-compact-payload
+          git checkout HEAD -- .github/workflows/ci.yml
+          rm -rf dist-app release test-results
           git add -A
           git commit -m "Make Apollo a compact dependency-free Electron app"
           git push origin HEAD:codex/electron-only-minimal-20260820
