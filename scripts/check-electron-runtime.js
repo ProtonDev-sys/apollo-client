@@ -32,11 +32,18 @@ const SCANNED_RUNTIME_EXTENSIONS = new Set([
 ]);
 const TAURI_RUNTIME_REFERENCE_PATTERN =
   /@tauri-apps\/|\b__TAURI__\b|\btauri::|\btauri:\/\/|\btauri\.conf(?:\.json5?|\.toml)?\b/i;
-const TAURI_PACKAGE_SCRIPT_PATTERN =
-  /@tauri-apps\/|\b(?:cargo\s+)?tauri\s+(?:add|android|build|bundle|dev|icon|info|init|ios|plugin|remove|signer)\b/i;
+const TAURI_PACKAGE_REFERENCE_PATTERN = /@tauri-apps\//i;
+const TAURI_COMMAND_SEGMENT_PATTERN =
+  /(?:^|&&|\|\||;|\|)\s*(?:(?:cross-env(?:-shell)?|env)\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)*(?:(?:(?:npx|bunx)\s+(?:--?[^\s]+\s+)*|cargo\s+|yarn\s+|(?:npm|pnpm)\s+(?:exec\s+)?(?:--\s+)?))?(?:\.\/)?(?:node_modules\/\.bin\/)?tauri(?:\s|$)/i;
 
 function isDirectElectronStartCommand(value) {
   return String(value || "").trim() === "electron .";
+}
+
+function hasTauriPackageCommand(value) {
+  const command = String(value || "");
+  return TAURI_PACKAGE_REFERENCE_PATTERN.test(command)
+    || TAURI_COMMAND_SEGMENT_PATTERN.test(command);
 }
 
 function walkFiles(directoryPath) {
@@ -102,7 +109,7 @@ function collectElectronRuntimeErrors(projectRoot) {
   }
 
   for (const [scriptName, command] of Object.entries(packageJson.scripts || {})) {
-    if (TAURI_PACKAGE_SCRIPT_PATTERN.test(String(command || ""))) {
+    if (hasTauriPackageCommand(command)) {
       errors.push(`Tauri command is not allowed in package script: ${scriptName}`);
     }
   }
@@ -166,8 +173,10 @@ module.exports = {
   RUNTIME_ROOT_FILES,
   SCANNED_RUNTIME_EXTENSIONS,
   TAURI_RUNTIME_REFERENCE_PATTERN,
-  TAURI_PACKAGE_SCRIPT_PATTERN,
+  TAURI_PACKAGE_REFERENCE_PATTERN,
+  TAURI_COMMAND_SEGMENT_PATTERN,
   isDirectElectronStartCommand,
+  hasTauriPackageCommand,
   walkFiles,
   validateRuntimeFile,
   collectElectronRuntimeErrors,
