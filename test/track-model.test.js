@@ -119,6 +119,14 @@ test("metadata equivalence tolerates small duration differences only", async () 
     false
   );
   assert.equal(areTracksEquivalent(base, { ...base }), true);
+  assert.equal(areTracksEquivalent({}, {}), false);
+  assert.equal(
+    areTracksEquivalent(
+      { title: "First", artist: "Artist A" },
+      { title: "Second", artist: "Artist B" }
+    ),
+    false
+  );
 });
 
 test("playability accepts resolvable provider metadata without requiring a direct url", async () => {
@@ -133,6 +141,12 @@ test("playability accepts resolvable provider metadata without requiring a direc
   assert.equal(isTrackLikelyPlayable({
     key: "remote:123",
     provider: "remote",
+    title: "Song",
+    artist: "Artist"
+  }), false);
+  assert.equal(isTrackLikelyPlayable({
+    key: "custom:123",
+    provider: "custom",
     title: "Song",
     artist: "Artist"
   }), false);
