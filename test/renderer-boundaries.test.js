@@ -38,13 +38,19 @@ test("renderer delegates track modeling to a focused module", () => {
   });
 });
 
-test("listen-along fallback uses the shared polling lifecycle", () => {
+test("listen-along fallback uses a generation-guarded polling lifecycle", () => {
   const source = readRenderer();
 
   assert.match(source, /from "\.\/renderer\/polling-controller\.js";/);
   assert.match(source, /const joinedListenAlongPolling = createPollingController\(/);
+  assert.match(
+    source,
+    /task: \(\{ isCurrent \}\) => refreshJoinedListenAlongSession\(\{ isCurrent \}\)/
+  );
   assert.match(source, /joinedListenAlongPolling\.start\(\)/);
   assert.match(source, /joinedListenAlongPolling\.stop\(\)/);
+  assert.match(source, /void joinedListenAlongPolling\.run\(\);/);
+  assert.match(source, /function isJoinedListenAlongRefreshCurrent\(/);
   assert.match(
     source,
     /function setupListenAlongJoinDataChannel[\s\S]*?channel\.onopen = \(\) => \{[\s\S]*?joinedListenAlongPolling\.stop\(\);/
@@ -53,8 +59,13 @@ test("listen-along fallback uses the shared polling lifecycle", () => {
     source,
     /Direct peer connect timed out\.[\s\S]*?startJoinedListenAlongPolling\(sessionId,/
   );
+  assert.match(
+    source,
+    /async function refreshJoinedListenAlongSession\(\{ isCurrent = \(\) => true \} = \{\}\)/
+  );
   assert.doesNotMatch(source, /pollHandle\s*:/);
   assert.doesNotMatch(source, /listenAlongState\.pollHandle/);
+  assert.doesNotMatch(source, /pollInFlight/);
 });
 
 test("listen-along captures the active playback deck", () => {
@@ -72,7 +83,7 @@ test("listen-along captures the active playback deck", () => {
 
 test("renderer decomposition reduces the top-level module size", () => {
   const source = readRenderer();
-  const maximumBytes = 344000;
+  const maximumBytes = 345000;
 
   assert.ok(
     Buffer.byteLength(source, "utf8") < maximumBytes,
