@@ -51,9 +51,22 @@ APOLLO_SERVER_URL="http://127.0.0.1:4848" npm start
 - minifies CSS and HTML;
 - removes remote font requests and uses system font stacks;
 - keeps optional main-process integrations lazy;
+- disables unused Vulkan and WebGPU features;
+- removes the corresponding prebuilt graphics compiler and fallback files after packaging;
 - emits no source maps or production `node_modules` tree.
 
-Electron Builder then packages only that generated runtime into a compressed ASAR and keeps only the `en-US` Electron locale.
+Electron Builder packages only that generated runtime into a compressed ASAR and keeps only the `en-US` Electron locale.
+
+Current measured outputs are:
+
+| Output | Size |
+|---|---:|
+| Generated Apollo runtime | 383,218 bytes |
+| Linux `app.asar` | 387,146 bytes |
+| Windows `app.asar` | 387,165 bytes |
+| Linux x64 unpacked runtime | 273,060,493 bytes |
+| Windows x64 unpacked runtime | 292,748,743 bytes |
+| Windows x64 installer | 94,838,255 bytes |
 
 ```sh
 npm run build:app
@@ -62,7 +75,7 @@ npm run pack:linux:ci
 npm run check:package
 ```
 
-Generated runtime files, release artifacts, native helper binaries, and SDK files remain outside version control.
+Generated runtime files, release artifacts, native helper binaries, and SDK files remain outside version control. See [Electron package size](docs/package-size.md) for the runtime breakdown, pruning rules, and the practical standalone size floor.
 
 ## Configuration
 
@@ -116,7 +129,7 @@ The command builds the helper into `native-bin/`, generates the compact Electron
 
 ## Validation
 
-`npm run verify` checks the Electron-only project boundary, source budgets, syntax, unit tests, generated runtime bundle, and production dependency audit. CI repeats this on Node.js 22 and 24, exercises the Electron UI under Xvfb, builds Linux and Windows packages, and records package-size reports.
+`npm run verify` checks the Electron-only project boundary, source budgets, syntax, unit tests, generated runtime bundle, and production dependency audit. CI repeats this on Node.js 22 and 24, exercises both the development and pruned packaged Electron applications, builds Linux and Windows packages, and enforces ASAR, unpacked-runtime, and installer-size limits.
 
 ## Project layout
 
