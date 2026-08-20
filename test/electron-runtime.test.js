@@ -6,6 +6,7 @@ const path = require("node:path");
 
 const {
   collectElectronRuntimeErrors,
+  findLockedTauriPackages,
   hasTauriPackageCommand,
   isDirectElectronStartCommand
 } = require("../scripts/check-electron-runtime");
@@ -23,9 +24,18 @@ function createProject(overrides = {}) {
     },
     ...overrides.packageJson
   };
+  const packageLock = overrides.packageLock || {
+    lockfileVersion: 3,
+    packages: {
+      "": {
+        devDependencies: packageJson.devDependencies || {}
+      }
+    }
+  };
 
   fs.mkdirSync(path.join(projectRoot, "src"), { recursive: true });
   fs.writeFileSync(path.join(projectRoot, "package.json"), JSON.stringify(packageJson));
+  fs.writeFileSync(path.join(projectRoot, "package-lock.json"), JSON.stringify(packageLock));
   fs.writeFileSync(path.join(projectRoot, "main.js"), "const { app } = require('electron');\nvoid app;\n");
   fs.writeFileSync(path.join(projectRoot, "preload.js"), "const { contextBridge } = require('electron');\nvoid contextBridge;\n");
   fs.writeFileSync(path.join(projectRoot, "src", "renderer.js"), "export const runtime = 'electron';\n");
@@ -64,6 +74,20 @@ test("Tauri package-command detection identifies executable commands without mat
   assert.equal(hasTauriPackageCommand("node scripts/check-electron-runtime.js"), false);
 });
 
+test("locked Tauri packages are detected across dependency depths", () => {
+  assert.deepEqual(
+    findLockedTauriPackages({
+      packages: {
+        "": {},
+        "node_modules/normal": {},
+        "node_modules/@tauri-apps/api": {},
+        "node_modules/wrapper/node_modules/tauri": {}
+      }
+    }),
+    ["node_modules/@tauri-apps/api", "node_modules/wrapper/node_modules/tauri"]
+  );
+});
+
 test("Electron client boundary accepts a valid project", (context) => {
   const projectRoot = createProject();
   context.after(() => fs.rmSync(projectRoot, { recursive: true, force: true }));
@@ -71,7 +95,7 @@ test("Electron client boundary accepts a valid project", (context) => {
   assert.deepEqual(collectElectronRuntimeErrors(projectRoot), []);
 });
 
-test("Electron client boundary rejects Tauri dependencies, configuration, scripts, artifacts, and runtime references", (context) => {
+test("Electron client boundary rejects Tauri dependencies, lock entries, configuration, scripts, artifacts, and runtime references", (context) => {
   const projectRoot = createProject({
     packageJson: {
       main: "main.js",
@@ -90,6 +114,13 @@ test("Electron client boundary rejects Tauri dependencies, configuration, script
         bundle: true
       }
     },
+    packageLock: {
+      lockfileVersion: 3,
+      packages: {
+        "": {},
+        "node_modules/@tauri-apps/cli": {}
+      }
+    },
     tauri: true,
     runtimeSource: "window.__TAURI__.core.invoke('search');\n",
     nativeRuntimeSource: "fn main() { tauri::Builder::default(); }\n"
@@ -101,6 +132,7 @@ test("Electron client boundary rejects Tauri dependencies, configuration, script
   assert.ok(errors.some((error) => error.includes("package.json Tauri configuration")));
   assert.ok(errors.some((error) => error.includes("package script: build:desktop")));
   assert.ok(errors.some((error) => error.includes("@tauri-apps/api")));
+  assert.ok(errors.some((error) => error.includes("package-lock.json")));
   assert.ok(errors.some((error) => error.includes("src-tauri")));
   assert.ok(errors.some((error) => error.includes("src/renderer.js")));
   assert.ok(errors.some((error) => error.includes("native-src/helper.rs")));

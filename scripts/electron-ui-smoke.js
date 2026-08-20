@@ -201,25 +201,46 @@ async function run() {
     5000
   );
 
+  const commandShortcutCondition = `Boolean(
+  document.querySelector(".apollo-command-layer")?.classList.contains("is-open")
+  && document.activeElement?.classList.contains("apollo-command-search")
+)`;
+let focusSnapshot = false;
+for (const keyCode of ["k", "K"]) {
+  window.focus();
+  window.webContents.focus();
   window.webContents.sendInputEvent({
     type: "keyDown",
-    keyCode: "K",
+    keyCode,
     modifiers: ["control"]
   });
+  await new Promise((resolve) => setTimeout(resolve, 50));
   window.webContents.sendInputEvent({
     type: "keyUp",
-    keyCode: "K",
+    keyCode,
     modifiers: ["control"]
   });
-  const focusSnapshot = await waitForCondition(
-    window,
-    `Boolean(
-      document.querySelector(".apollo-command-layer")?.classList.contains("is-open")
-      && document.activeElement?.classList.contains("apollo-command-search")
-    )`,
-    5000
-  );
-  assert.equal(Boolean(focusSnapshot), true);
+
+  const deadline = Date.now() + 1500;
+  while (Date.now() < deadline) {
+    focusSnapshot = await window.webContents.executeJavaScript(
+      commandShortcutCondition,
+      true
+    ).catch(() => false);
+    if (focusSnapshot) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (focusSnapshot) {
+    break;
+  }
+}
+
+if (!focusSnapshot) {
+  focusSnapshot = await waitForCondition(window, commandShortcutCondition, 5000);
+}
+assert.equal(Boolean(focusSnapshot), true);
 
   fs.mkdirSync(OUTPUT_DIRECTORY, {
     recursive: true

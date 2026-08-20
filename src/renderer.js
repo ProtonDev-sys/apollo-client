@@ -79,6 +79,12 @@ import {
 } from "./renderer/track-model.js";
 import { createPollingController } from "./renderer/polling-controller.js";
 import {
+  createIntervalGate,
+  getLruMapValue,
+  setLruMapValue,
+  trimOldestArrayEntries
+} from "./renderer/resource-controls.js";
+import {
   buildSearchCacheKey as buildClientSearchCacheKey,
   createTimedLruCache,
   createTrackSearchEngine,
@@ -113,6 +119,16 @@ const AUTOPLAY_QUEUE_APPEND_COUNT = 8;
 const AUTOPLAY_RECENT_HISTORY_SIZE = 4;
 const AUTOPLAY_UPCOMING_CONTEXT_SIZE = 6;
 const PLAYBACK_URL_CACHE_TTL_MS = 5 * 60 * 1000;
+const PLAYBACK_URL_CACHE_MAX_ENTRIES = 256;
+const PLAYBACK_FAILURE_CACHE_MAX_ENTRIES = 128;
+const DURATION_CACHE_MAX_ENTRIES = 800;
+const ARTIST_PROFILE_CACHE_MAX_ENTRIES = 48;
+const ARTIST_TRACKS_CACHE_MAX_ENTRIES = 8;
+const ARTIST_RELEASES_CACHE_MAX_ENTRIES = 48;
+const NAVIGATION_HISTORY_MAX_ENTRIES = 16;
+const PLAYBACK_PREFETCH_LIMIT = 3;
+const PLAYBACK_UI_UPDATE_INTERVAL_MS = 250;
+const PLAYBACK_STATE_PERSIST_INTERVAL_MS = 1000;
 const DURATION_CACHE_STORAGE_KEY = "apollo-duration-cache-v1";
 const LIBRARY_SNAPSHOT_STORAGE_KEY = "apollo-library-snapshot-v1";
 const MIN_PERCEPTUAL_VOLUME_DB = -36;
@@ -366,6 +382,8 @@ const localTrackSearch = createTrackSearchEngine({
 const artistProfileCache = new Map();
 const artistTracksCache = new Map();
 const artistReleasesCache = new Map();
+const playbackUiUpdateGate = createIntervalGate(PLAYBACK_UI_UPDATE_INTERVAL_MS);
+const playbackStatePersistenceGate = createIntervalGate(PLAYBACK_STATE_PERSIST_INTERVAL_MS);
 const pendingDurationKeys = new Set();
 const pendingDurationProbeQueue = [];
 let activeDurationProbeCount = 0;
@@ -871,7 +889,11 @@ function persistSettings() {
   persistStoredSettings(localStorage, state.settings);
 }
 
-function persistPlaybackState() {
+function persistPlaybackState({ throttled = false, force = false } = {}) {
+  if (throttled && !playbackStatePersistenceGate.shouldRun({ force })) {
+    return;
+  }
+
   persistStoredPlaybackState(localStorage, {
     selectedPlaylistId: state.selectedPlaylistId,
     selectedTrackKey: state.selectedTrackKey,
@@ -1755,6 +1777,7 @@ function syncNavigationHistory(source, { replace = false } = {}) {
     currentNavigationSnapshot = nextSnapshot;
   } else {
     navigationBackStack.push(structuredClone(currentNavigationSnapshot));
+    trimOldestArrayEntries(navigationBackStack, NAVIGATION_HISTORY_MAX_ENTRIES);
     currentNavigationSnapshot = nextSnapshot;
   }
 
@@ -1908,6 +1931,7 @@ async function requestHistoryNavigation(direction) {
     }
 
     navigationForwardStack.push(structuredClone(currentNavigationSnapshot));
+    trimOldestArrayEntries(navigationForwardStack, NAVIGATION_HISTORY_MAX_ENTRIES);
     const previousSnapshot = navigationBackStack.pop();
     renderNavigationButtons();
     await applyNavigationSnapshot(previousSnapshot);
@@ -1919,6 +1943,7 @@ async function requestHistoryNavigation(direction) {
   }
 
   navigationBackStack.push(structuredClone(currentNavigationSnapshot));
+  trimOldestArrayEntries(navigationBackStack, NAVIGATION_HISTORY_MAX_ENTRIES);
   const nextSnapshot = navigationForwardStack.pop();
   renderNavigationButtons();
   await applyNavigationSnapshot(nextSnapshot);
@@ -2378,20 +2403,22 @@ async function fetchArtistSearchResults(query, { signal } = {}) {
 }
 
 async function fetchArtistProfile(artistId, { signal } = {}) {
-  if (artistProfileCache.has(artistId)) {
-    return artistProfileCache.get(artistId);
+  const cachedProfile = getLruMapValue(artistProfileCache, artistId);
+  if (cachedProfile) {
+    return cachedProfile;
   }
 
   const profile = normaliseArtist(
     await requestJson(`/api/artists/${encodeURIComponent(artistId)}`, { signal })
   );
-  artistProfileCache.set(artistId, profile);
+  setLruMapValue(artistProfileCache, artistId, profile, ARTIST_PROFILE_CACHE_MAX_ENTRIES);
   return profile;
 }
 
 async function fetchArtistTracks(artistId, { signal } = {}) {
-  if (artistTracksCache.has(artistId)) {
-    return artistTracksCache.get(artistId);
+  const cachedTracks = getLruMapValue(artistTracksCache, artistId);
+  if (cachedTracks) {
+    return cachedTracks;
   }
 
   const items = [];
@@ -2409,13 +2436,14 @@ async function fetchArtistTracks(artistId, { signal } = {}) {
   } while (page <= totalPages);
 
   const tracks = dedupeTracks(items);
-  artistTracksCache.set(artistId, tracks);
+  setLruMapValue(artistTracksCache, artistId, tracks, ARTIST_TRACKS_CACHE_MAX_ENTRIES);
   return tracks;
 }
 
 async function fetchArtistReleases(artistId, { signal } = {}) {
-  if (artistReleasesCache.has(artistId)) {
-    return artistReleasesCache.get(artistId);
+  const cachedReleases = getLruMapValue(artistReleasesCache, artistId);
+  if (cachedReleases) {
+    return cachedReleases;
   }
 
   const payload = await requestJson(
@@ -2428,7 +2456,7 @@ async function fetchArtistReleases(artistId, { signal } = {}) {
     primaryType: release.primaryType || "",
     firstReleaseDate: release.firstReleaseDate || ""
   }));
-  artistReleasesCache.set(artistId, releases);
+  setLruMapValue(artistReleasesCache, artistId, releases, ARTIST_RELEASES_CACHE_MAX_ENTRIES);
   return releases;
 }
 
@@ -4258,7 +4286,7 @@ function syncSelectedTrack() {
 }
 
 function getCachedDuration(track) {
-  return durationCache.get(track.key) ?? track.duration ?? getKnownDurationForTrack(track) ?? null;
+  return getLruMapValue(durationCache, track.key) ?? track.duration ?? getKnownDurationForTrack(track) ?? null;
 }
 
 function cacheTrackDuration(track, durationSeconds) {
@@ -4266,12 +4294,12 @@ function cacheTrackDuration(track, durationSeconds) {
     return;
   }
 
-  durationCache.set(track.key, durationSeconds);
+  setLruMapValue(durationCache, track.key, durationSeconds, DURATION_CACHE_MAX_ENTRIES);
   persistDurationCache();
 }
 
 function getCachedPlaybackUrl(trackKey) {
-  const entry = playbackUrlCache.get(trackKey);
+  const entry = getLruMapValue(playbackUrlCache, trackKey);
   if (!entry) {
     return "";
   }
@@ -4299,7 +4327,7 @@ function getTrackPlaybackFailure(trackOrKey) {
     return null;
   }
 
-  return playbackFailureCache.get(trackKey) || null;
+  return getLruMapValue(playbackFailureCache, trackKey) || null;
 }
 
 function hasTrackPlaybackFailure(trackOrKey) {
@@ -4367,10 +4395,10 @@ function rememberTrackPlaybackFailure(track, error, { renderApp = false } = {}) 
     : "Apollo could not find a playable source for this track.";
   const message = String(error?.message || fallbackMessage).trim() || fallbackMessage;
 
-  playbackFailureCache.set(track.key, {
+  setLruMapValue(playbackFailureCache, track.key, {
     message,
     recordedAt: Date.now()
-  });
+  }, PLAYBACK_FAILURE_CACHE_MAX_ENTRIES);
   playbackUrlCache.delete(track.key);
   pendingPlaybackUrlCache.delete(track.key);
   if (playbackWarmupTrackKey === track.key) {
@@ -4615,12 +4643,12 @@ function cachePlaybackUrl(trackKey, url, ttlMs = PLAYBACK_URL_CACHE_TTL_MS) {
     return url;
   }
 
-  playbackUrlCache.set(trackKey, {
+  setLruMapValue(playbackUrlCache, trackKey, {
     url,
     expiresAt: Number.isFinite(ttlMs)
       ? Date.now() + Math.max(0, ttlMs)
       : Number.POSITIVE_INFINITY
-  });
+  }, PLAYBACK_URL_CACHE_MAX_ENTRIES);
   return url;
 }
 
@@ -4746,7 +4774,8 @@ function prefetchUpcomingPlayback(track) {
 
   const upcomingTracks = getOrderedUpcomingQueueEntries()
     .map((entry) => entry.track)
-    .filter(Boolean);
+    .filter(Boolean)
+    .slice(0, PLAYBACK_PREFETCH_LIMIT);
 
   upcomingTracks.forEach((upcomingTrack) => {
     if (upcomingTrack?.key && upcomingTrack.key !== anchorTrack?.key) {
@@ -6026,7 +6055,12 @@ function applyJoinedListenAlongSnapshot(snapshot, { initial = false } = {}) {
 
   listenAlongRtc.latestSnapshot = snapshot;
   const track = createTrackFromListenAlongSnapshot(snapshot);
-  durationCache.set(track.key, Number(snapshot.durationSeconds) || 0);
+  setLruMapValue(
+    durationCache,
+    track.key,
+    Number(snapshot.durationSeconds) || 0,
+    DURATION_CACHE_MAX_ENTRIES
+  );
   state.transientPlaybackTrack = track;
   state.playbackTrackKey = track.key;
   state.selectedTrackKey = track.key;
@@ -11050,6 +11084,10 @@ function bindPlaybackElementEvents(element) {
       return;
     }
 
+    if (!playbackUiUpdateGate.shouldRun()) {
+      return;
+    }
+
     renderPlayback();
     playbackState.currentTime = element.currentTime || 0;
     syncSystemMediaSessionState();
@@ -11063,7 +11101,7 @@ function bindPlaybackElementEvents(element) {
         threshold: 4
       });
     }
-    persistPlaybackState();
+    persistPlaybackState({ throttled: true });
   });
 
   element.addEventListener("seeked", (event) => {
@@ -11084,7 +11122,12 @@ function bindPlaybackElementEvents(element) {
 
     const playbackTrack = getPlaybackTrack();
     if (playbackTrack && element.duration) {
-      durationCache.set(playbackTrack.key, element.duration);
+      setLruMapValue(
+        durationCache,
+        playbackTrack.key,
+        element.duration,
+        DURATION_CACHE_MAX_ENTRIES
+      );
       persistDurationCache();
     }
 
@@ -11312,6 +11355,7 @@ const {
 } = await initialiseListenAlongSignaling();
 
 window.addEventListener("beforeunload", () => {
+  persistPlaybackState({ force: true });
   for (const downloadId of activeDownloadWatchers.keys()) {
     clearDownloadWatcher(downloadId);
   }

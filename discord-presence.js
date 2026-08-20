@@ -1,4 +1,11 @@
-const RPC = require("discord-rpc");
+let cachedDiscordRpc = null;
+
+function loadDiscordRpc() {
+  if (!cachedDiscordRpc) {
+    cachedDiscordRpc = require("discord-rpc");
+  }
+  return cachedDiscordRpc;
+}
 
 const DEFAULT_CONFIG = {
   enabled: false,
@@ -155,7 +162,12 @@ function buildActivity(config, playback, appName) {
   return activity;
 }
 
-function createDiscordPresenceController({ appName = "Apollo Client", onJoin = null, logger = null } = {}) {
+function createDiscordPresenceController({
+  appName = "Apollo Client",
+  onJoin = null,
+  logger = null,
+  loadRpc = loadDiscordRpc
+} = {}) {
   let config = { ...DEFAULT_CONFIG };
   let playback = null;
   let client = null;
@@ -224,6 +236,15 @@ function createDiscordPresenceController({ appName = "Apollo Client", onJoin = n
     }
 
     clearReconnectTimer();
+
+    let RPC;
+    try {
+      RPC = loadRpc();
+    } catch (error) {
+      log(`load failed error=${error?.message || "unknown"}`);
+      scheduleReconnect();
+      return null;
+    }
 
     const nextClient = new RPC.Client({ transport: "ipc" });
     client = nextClient;
@@ -407,5 +428,6 @@ function createDiscordPresenceController({ appName = "Apollo Client", onJoin = n
 }
 
 module.exports = {
-  createDiscordPresenceController
+  createDiscordPresenceController,
+  loadDiscordRpc
 };
