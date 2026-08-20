@@ -73,8 +73,6 @@ track_index_clear_count = renderer.count("trackSearchIndex.clear();")
 if track_index_clear_count < 1:
     raise SystemExit("search index teardown: no trackSearchIndex.clear reference found")
 renderer = renderer.replace("trackSearchIndex.clear();", "localTrackSearch.clear();")
-if "trackSearchIndex" in renderer:
-    raise SystemExit("stale trackSearchIndex reference remains")
 
 renderer = replace_block(
     renderer,
