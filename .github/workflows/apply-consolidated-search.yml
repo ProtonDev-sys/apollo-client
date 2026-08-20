@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - codex/progressive-song-search-20260820
+  pull_request:
 
 permissions:
   contents: write
@@ -11,7 +12,9 @@ permissions:
 jobs:
   apply:
     name: Apply and validate renderer search integration
-    if: github.actor != 'github-actions[bot]'
+    if: >-
+      github.actor != 'github-actions[bot]' &&
+      (github.event_name == 'push' || github.head_ref == 'codex/progressive-song-search-20260820')
     runs-on: ubuntu-latest
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
