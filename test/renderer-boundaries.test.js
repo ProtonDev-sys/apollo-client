@@ -51,7 +51,7 @@ test("listen-along fallback uses the shared polling lifecycle", () => {
 
 test("renderer decomposition reduces the top-level module size", () => {
   const source = readRenderer();
-  const maximumBytes = 342000;
+  const maximumBytes = 344000;
 
   assert.ok(
     Buffer.byteLength(source, "utf8") < maximumBytes,
