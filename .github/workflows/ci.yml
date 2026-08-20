@@ -33,12 +33,37 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+
           main_path = Path("main.js")
-          source = main_path.read_text(encoding="utf-8")
-          source = source.replace("${message}\\n`);", "${message}\n`);", 1)
-          main_path.write_text(source, encoding="utf-8")
+          main_source = main_path.read_text(encoding="utf-8")
+          main_source = main_source.replace("${message}\\n`);", "${message}\n`);", 1)
+          main_path.write_text(main_source, encoding="utf-8")
+
+          script_path = Path("scripts/apply-electron-resource-pass.py")
+          script_source = script_path.read_text(encoding="utf-8")
+          old = '    2,\n    "bounded back navigation history",'
+          new = '    1,\n    "bounded back navigation history",'
+          if script_source.count(old) != 1:
+              raise SystemExit("navigation history patch budget marker was not unique")
+          script_path.write_text(script_source.replace(old, new, 1), encoding="utf-8")
           PY
           python3 scripts/apply-electron-resource-pass.py
+          python3 - <<'PY'
+          from pathlib import Path
+
+          renderer_path = Path("src/renderer.js")
+          source = renderer_path.read_text(encoding="utf-8")
+          old = '''  navigationBackStack.push(structuredClone(currentNavigationSnapshot));
+          const nextSnapshot = navigationForwardStack.pop();
+          '''
+          new = '''  navigationBackStack.push(structuredClone(currentNavigationSnapshot));
+          trimOldestArrayEntries(navigationBackStack, NAVIGATION_HISTORY_MAX_ENTRIES);
+          const nextSnapshot = navigationForwardStack.pop();
+          '''
+          if source.count(old) != 1:
+              raise SystemExit("forward navigation history path was not unique")
+          renderer_path.write_text(source.replace(old, new, 1), encoding="utf-8")
+          PY
           git rm src/desktop/listen-along-signaling.js src/desktop/runtime-assets.js
       - name: Regenerate compact dependency lockfile
         run: npm install --package-lock-only --ignore-scripts
