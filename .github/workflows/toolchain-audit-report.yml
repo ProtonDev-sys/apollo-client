@@ -1,0 +1,33 @@
+name: Toolchain audit report
+
+on:
+  push:
+    branches:
+      - codex/toolchain-audit-20260820
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - name: Install complete dependency tree
+        run: npm ci
+      - name: Capture complete audit report
+        shell: bash
+        run: npm audit --json > toolchain-audit.json || true
+      - name: Upload audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: apollo-client-toolchain-audit
+          path: toolchain-audit.json
+          if-no-files-found: error
+          retention-days: 3
