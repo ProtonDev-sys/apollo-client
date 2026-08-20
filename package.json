@@ -40,6 +40,7 @@
     "npmRebuild": false,
     "removePackageScripts": true,
     "removePackageKeywords": true,
+    "afterPack": "scripts/prune-electron-runtime.js",
     "electronLanguages": [
       "en-US"
     ],
