@@ -7,7 +7,7 @@
     "preinstall": "node scripts/check-engines.js",
     "start": "electron .",
     "build:app": "node scripts/build-app.js && node scripts/write-runtime-manifest.js",
-    "prepare:package": "node -e \"require('node:fs').mkdirSync('native-bin',{recursive:true})\"",
+    "prepare:package": "node -e \"const fs=require('node:fs');fs.rmSync('native-bin',{recursive:true,force:true});fs.mkdirSync('native-bin',{recursive:true})\"",
     "check:runtime": "node scripts/check-electron-runtime.js",
     "check:resources": "node scripts/check-resource-budget.js",
     "check:bundle": "node scripts/check-bundle-budget.js",
@@ -23,7 +23,7 @@
     "build:discord-social-helper": "scripts\\build-discord-social-helper.cmd",
     "build:win": "npm run build:app && npm run prepare:package && electron-builder --win nsis",
     "build:win:portable": "npm run build:app && npm run prepare:package && electron-builder --dir --win --publish never && node scripts/build-windows-portable.js",
-    "build:win:social": "npm run build:app && npm run build:discord-social-helper && electron-builder --win nsis"
+    "build:win:social": "npm run build:app && npm run prepare:package && npm run build:discord-social-helper && electron-builder --win nsis"
   },
   "engines": {
     "node": ">=22.12.0",
