@@ -50,6 +50,24 @@ jobs:
           executable=$(find "$source_dir" -maxdepth 1 -type f -perm -111 ! -name 'chrome-sandbox' ! -name 'chrome_crashpad_handler' | head -n 1)
           test -n "$executable"
 
+          launch_variant() {
+            local target_executable="$1"
+            local name="$2"
+            shift 2
+            xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' bash -c '
+              set -e
+              app="$1"
+              user_data="$2"
+              shift 2
+              "$app" --no-sandbox --user-data-dir="$user_data" "$@" >"$user_data.log" 2>&1 &
+              pid=$!
+              sleep 7
+              kill -0 "$pid"
+              kill "$pid" || true
+              wait "$pid" || true
+            ' _ "$target_executable" "$RUNNER_TEMP/user-$name" "$@"
+          }
+
           test_variant() {
             local name="$1"
             shift
@@ -64,17 +82,11 @@ jobs:
             after=$(du -sb "$target" | cut -f1)
             printf '%s: %s bytes removed\n' "$name" "$((before - after))"
             local target_executable="$target/$(basename "$executable")"
-            xvfb-run --auto-servernum --server-args='-screen 0 1280x800x24' bash -c '
-              set -e
-              app="$1"
-              user_data="$2"
-              "$app" --no-sandbox --user-data-dir="$user_data" >"$user_data.log" 2>&1 &
-              pid=$!
-              sleep 7
-              kill -0 "$pid"
-              kill "$pid" || true
-              wait "$pid" || true
-            ' _ "$target_executable" "$RUNNER_TEMP/user-$name"
+            launch_variant "$target_executable" "$name-normal" \
+              --disable-features=Vulkan,WebGPU,WebGPUService
+            launch_variant "$target_executable" "$name-software" \
+              --disable-features=Vulkan,WebGPU,WebGPUService \
+              --disable-gpu
           }
 
           test_variant hardware-only \
@@ -87,13 +99,6 @@ jobs:
             vk_swiftshader_icd.json \
             libvulkan.so.1 \
             chrome_crashpad_handler
-
-          test_variant hardware-no-crashpad-lowdpi \
-            libvk_swiftshader.so \
-            vk_swiftshader_icd.json \
-            libvulkan.so.1 \
-            chrome_crashpad_handler \
-            chrome_100_percent.pak
 
   windows-footprint:
     name: Windows runtime footprint
@@ -132,16 +137,51 @@ jobs:
             }
           $total = (Get-ChildItem release/win-unpacked -Recurse -File | Measure-Object Length -Sum).Sum
           "Windows unpacked total: $total bytes"
-      - name: Measure candidate lean Windows runtime
+      - name: Exercise candidate lean Windows runtimes
         shell: pwsh
         run: |
           $source = (Resolve-Path 'release/win-unpacked').Path
           $baseline = (Get-ChildItem $source -Recurse -File | Measure-Object Length -Sum).Sum
           $groups = [ordered]@{
-            'hardware-only' = @('vk_swiftshader.dll', 'vk_swiftshader_icd.json', 'vulkan-1.dll')
-            'hardware-no-crashpad' = @('vk_swiftshader.dll', 'vk_swiftshader_icd.json', 'vulkan-1.dll', 'chrome_crashpad_handler.exe')
-            'hardware-no-crashpad-lowdpi' = @('vk_swiftshader.dll', 'vk_swiftshader_icd.json', 'vulkan-1.dll', 'chrome_crashpad_handler.exe', 'chrome_100_percent.pak')
+            'hardware-only' = @(
+              'vk_swiftshader.dll',
+              'vk_swiftshader_icd.json',
+              'vulkan-1.dll'
+            )
+            'no-webgpu-vulkan' = @(
+              'dxcompiler.dll',
+              'dxil.dll',
+              'vk_swiftshader.dll',
+              'vk_swiftshader_icd.json',
+              'vulkan-1.dll'
+            )
           }
+
+          function Test-Launch([string]$Target, [string]$Name, [string[]]$ExtraArguments) {
+            $exe = Join-Path $Target 'Apollo Client.exe'
+            $userData = Join-Path $env:RUNNER_TEMP "user-$Name"
+            $stdout = Join-Path $env:RUNNER_TEMP "$Name.stdout.log"
+            $stderr = Join-Path $env:RUNNER_TEMP "$Name.stderr.log"
+            Remove-Item $userData -Recurse -Force -ErrorAction SilentlyContinue
+            $arguments = @(
+              "--user-data-dir=$userData",
+              '--disable-features=Vulkan,WebGPU,WebGPUService'
+            ) + $ExtraArguments
+            $process = Start-Process $exe \
+              -ArgumentList $arguments \
+              -RedirectStandardOutput $stdout \
+              -RedirectStandardError $stderr \
+              -PassThru
+            Start-Sleep -Seconds 8
+            if ($process.HasExited) {
+              Get-Content $stdout -ErrorAction SilentlyContinue
+              Get-Content $stderr -ErrorAction SilentlyContinue
+              throw "$Name exited before the packaged runtime smoke window completed."
+            }
+            Stop-Process -Id $process.Id -Force
+            Wait-Process -Id $process.Id -ErrorAction SilentlyContinue
+          }
+
           foreach ($entry in $groups.GetEnumerator()) {
             $target = Join-Path $env:RUNNER_TEMP "apollo-$($entry.Key)"
             Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue
@@ -151,4 +191,6 @@ jobs:
             }
             $after = (Get-ChildItem $target -Recurse -File | Measure-Object Length -Sum).Sum
             "$($entry.Key): $($baseline - $after) bytes removed"
+            Test-Launch $target "$($entry.Key)-normal" @()
+            Test-Launch $target "$($entry.Key)-software" @('--disable-gpu')
           }
