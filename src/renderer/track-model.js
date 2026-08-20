@@ -16,11 +16,12 @@ const GENERIC_ALBUM_NAMES = new Set([
   "deezer"
 ]);
 
-const NON_RESOLVING_PROVIDERS = new Set([
-  "",
-  "library",
-  "listen-along",
-  "remote"
+const RESOLVABLE_PROVIDERS = new Set([
+  "deezer",
+  "itunes",
+  "soundcloud",
+  "spotify",
+  "youtube"
 ]);
 
 export function buildTrackKey(prefix, id) {
@@ -239,7 +240,9 @@ export function areTracksEquivalent(leftTrack, rightTrack) {
     return false;
   }
 
-  return leftTrack.key === rightTrack.key
+  const leftKey = String(leftTrack.key || "").trim();
+  const rightKey = String(rightTrack.key || "").trim();
+  return Boolean(leftKey && rightKey && leftKey === rightKey)
     || hasMatchingProviderIds(leftTrack, rightTrack)
     || hasMatchingNormalizedMetadata(leftTrack, rightTrack);
 }
@@ -253,7 +256,8 @@ export function isTrackLikelyPlayable(track) {
     return false;
   }
 
-  if (track.provider === "library" || track.trackId) {
+  const provider = normaliseMetadataText(track.provider);
+  if (provider === "library" || track.trackId) {
     return true;
   }
 
@@ -261,8 +265,7 @@ export function isTrackLikelyPlayable(track) {
     return true;
   }
 
-  const provider = normaliseMetadataText(track.provider);
-  if (NON_RESOLVING_PROVIDERS.has(provider)) {
+  if (!RESOLVABLE_PROVIDERS.has(provider)) {
     return false;
   }
 
