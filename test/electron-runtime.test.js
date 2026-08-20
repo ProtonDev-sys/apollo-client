@@ -18,9 +18,10 @@ function createProject(overrides = {}) {
     scripts: {
       start: "electron .",
       "build:app": "node scripts/build-app.js",
-      "build:win": "npm run build:app && electron-builder --win nsis",
-      "build:win:portable": "npm run build:app && electron-builder --dir --win && node scripts/build-windows-portable.js",
-      "build:win:social": "npm run build:app && npm run build:discord-social-helper && electron-builder --win nsis"
+      "prepare:package": "node -e \"const fs=require('node:fs');fs.rmSync('native-bin',{recursive:true,force:true});fs.mkdirSync('native-bin',{recursive:true})\"",
+      "build:win": "npm run build:app && npm run prepare:package && electron-builder --win nsis",
+      "build:win:portable": "npm run build:app && npm run prepare:package && electron-builder --dir --win && node scripts/build-windows-portable.js",
+      "build:win:social": "npm run build:app && npm run prepare:package && npm run build:discord-social-helper && electron-builder --win nsis"
     },
     dependencies: {},
     devDependencies: {
@@ -103,6 +104,7 @@ test("Electron-only boundary rejects mixed toolchains and broad packaging", (con
       scripts: {
         start: "echo electron",
         "build:app": "echo build",
+        "prepare:package": "node -e \"require('node:fs').mkdirSync('native-bin',{recursive:true})\"",
         "build:win": "npm run build:discord-social-helper && electron-builder --win nsis",
         "build:win:portable": "electron-builder --dir --win",
         "build:win:social": "electron-builder --win nsis"
@@ -139,6 +141,7 @@ test("Electron-only boundary rejects mixed toolchains and broad packaging", (con
   const errors = collectElectronRuntimeErrors(projectRoot).join("\n");
   assert.match(errors, /main\.js/);
   assert.match(errors, /direct Electron launch/);
+  assert.match(errors, /stale optional native resources/);
   assert.match(errors, /compact Electron core/);
   assert.match(errors, /optional Discord Social build/);
   assert.match(errors, /build-windows-portable/);
