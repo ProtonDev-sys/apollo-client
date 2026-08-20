@@ -105,6 +105,51 @@ test("polling controller never overlaps asynchronous tasks", async () => {
   await nextRun;
 });
 
+test("polling controller invalidates stale tasks and permits a replacement generation", async () => {
+  const { createPollingController } = await importPollingController();
+  const contexts = [];
+  const releases = [];
+
+  const controller = createPollingController({
+    intervalMs: 1000,
+    task: (context) => {
+      contexts.push(context);
+      return new Promise((resolve) => {
+        releases.push(resolve);
+      });
+    }
+  });
+
+  const firstGeneration = controller.getGeneration();
+  const firstRun = controller.run();
+  await new Promise(setImmediate);
+
+  assert.equal(contexts.length, 1);
+  assert.equal(contexts[0].generation, firstGeneration);
+  assert.equal(contexts[0].isCurrent(), true);
+
+  controller.stop();
+  assert.equal(contexts[0].isCurrent(), false);
+  assert.equal(controller.getGeneration(), firstGeneration + 1);
+  assert.equal(controller.isTaskActive(), false);
+
+  const replacementRun = controller.run();
+  await new Promise(setImmediate);
+
+  assert.equal(contexts.length, 2);
+  assert.equal(contexts[1].generation, firstGeneration + 1);
+  assert.equal(contexts[1].isCurrent(), true);
+  assert.equal(controller.isTaskActive(), true);
+
+  releases[0]();
+  await firstRun;
+  assert.equal(controller.isTaskActive(), true);
+
+  releases[1]();
+  await replacementRun;
+  assert.equal(controller.isTaskActive(), false);
+});
+
 test("polling controller reports failures and keeps its lifecycle usable", async () => {
   const { createPollingController } = await importPollingController();
   const scheduler = createFakeScheduler();
