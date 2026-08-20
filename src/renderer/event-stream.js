@@ -56,7 +56,7 @@ function parseEventBlock(block) {
     event: eventName,
     id: eventId,
     data,
-    done: false
+    done: eventName === "done"
   };
 }
 
@@ -67,6 +67,22 @@ export function createJsonEventStreamParser({ onEvent = () => {} } = {}) {
 
   let buffer = "";
   let lastEvent = null;
+  let pendingCarriageReturn = false;
+
+  function appendChunk(chunk) {
+    let nextChunk = String(chunk || "");
+    if (pendingCarriageReturn) {
+      nextChunk = `\r${nextChunk}`;
+      pendingCarriageReturn = false;
+    }
+
+    if (nextChunk.endsWith("\r")) {
+      pendingCarriageReturn = true;
+      nextChunk = nextChunk.slice(0, -1);
+    }
+
+    buffer += normaliseLineEndings(nextChunk);
+  }
 
   async function dispatchBlock(block) {
     const parsed = parseEventBlock(block);
@@ -79,9 +95,7 @@ export function createJsonEventStreamParser({ onEvent = () => {} } = {}) {
     return parsed;
   }
 
-  async function push(chunk) {
-    buffer += normaliseLineEndings(chunk);
-
+  async function drainBlocks() {
     let separatorIndex = buffer.indexOf("\n\n");
     while (separatorIndex >= 0) {
       const block = buffer.slice(0, separatorIndex);
@@ -91,11 +105,21 @@ export function createJsonEventStreamParser({ onEvent = () => {} } = {}) {
       }
       separatorIndex = buffer.indexOf("\n\n");
     }
+  }
 
+  async function push(chunk) {
+    appendChunk(chunk);
+    await drainBlocks();
     return lastEvent;
   }
 
   async function finish() {
+    if (pendingCarriageReturn) {
+      pendingCarriageReturn = false;
+      buffer += "\n";
+    }
+
+    await drainBlocks();
     if (buffer.trim()) {
       await dispatchBlock(buffer);
     }
