@@ -1,11 +1,29 @@
+const SEARCH_MARK_PATTERN = /\p{M}+/gu;
+const SEARCH_SEPARATOR_PATTERN = /[^\p{L}\p{N}]+/gu;
+const MAX_PREFIX_LENGTH = 32;
+
 export function normaliseSearchText(value) {
   return String(value || "")
     .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
+    .replace(SEARCH_MARK_PATTERN, "")
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(SEARCH_SEPARATOR_PATTERN, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+export function tokenizeSearchQuery(value) {
+  return Array.from(new Set(
+    normaliseSearchText(value)
+      .split(" ")
+      .map((token) => token.trim())
+      .filter(Boolean)
+  ));
+}
+
+export function shouldSearchRemote(query, { minimumCharacters = 2 } = {}) {
+  const compactQuery = normaliseSearchText(query).replace(/\s+/g, "");
+  return compactQuery.length >= Math.max(1, Number(minimumCharacters) || 2);
 }
 
 function normaliseGenre(genre) {
@@ -14,40 +32,65 @@ function normaliseGenre(genre) {
     : normaliseSearchText(genre);
 }
 
-function createTrackSignature(track = {}) {
-  return JSON.stringify([
-    track.key || "",
-    track.title || "",
-    track.artist || "",
-    Array.isArray(track.artists) ? track.artists : track.artists || "",
-    track.album || "",
-    track.albumArtist || "",
-    track.genre || "",
-    track.fileName || "",
-    track.filePath || "",
-    track.duration || 0
-  ]);
+function addIndexValue(index, key, value) {
+  if (!key) {
+    return;
+  }
+
+  const values = index.get(key);
+  if (values) {
+    values.add(value);
+    return;
+  }
+
+  index.set(key, new Set([value]));
 }
 
-export function createTrackSearchDocument(track = {}) {
-  const title = normaliseSearchText(track.title);
-  const artist = normaliseSearchText(track.artist);
+function unionSets(...sets) {
+  const result = new Set();
+  for (const set of sets) {
+    if (!set) {
+      continue;
+    }
+    for (const value of set) {
+      result.add(value);
+    }
+  }
+  return result;
+}
+
+function intersectSets(left, right) {
+  if (!left) {
+    return new Set(right);
+  }
+
+  const [smaller, larger] = left.size <= right.size
+    ? [left, right]
+    : [right, left];
+  const result = new Set();
+
+  for (const value of smaller) {
+    if (larger.has(value)) {
+      result.add(value);
+    }
+  }
+  return result;
+}
+
+export function createTrackSearchDocument(track = {}, sourceIndex = 0) {
+  const title = normaliseSearchText(track.normalizedTitle || track.title);
+  const artist = normaliseSearchText(track.normalizedArtist || track.artist);
   const artists = Array.isArray(track.artists)
     ? track.artists.map(normaliseSearchText).filter(Boolean).join(" ")
     : normaliseSearchText(track.artists);
-  const album = normaliseSearchText(track.album);
+  const album = normaliseSearchText(track.normalizedAlbum || track.album);
   const albumArtist = normaliseSearchText(track.albumArtist);
   const genre = normaliseGenre(track.genre);
   const fileName = normaliseSearchText(track.fileName || track.filePath);
+  const provider = normaliseSearchText(track.provider || track.sourcePlatform);
   const titleArtist = [title, artist].filter(Boolean).join(" ");
   const artistTitle = [artist, title].filter(Boolean).join(" ");
-  const searchableText = [title, artist, artists, album, albumArtist, genre, fileName]
-    .filter(Boolean)
-    .join(" ");
-
-  return {
-    track,
-    signature: createTrackSignature(track),
+  const searchableText = [
     title,
     artist,
     artists,
@@ -55,12 +98,28 @@ export function createTrackSearchDocument(track = {}) {
     albumArtist,
     genre,
     fileName,
+    provider
+  ].filter(Boolean).join(" ");
+
+  return {
+    track,
+    sourceIndex,
+    title,
+    artist,
+    artists,
+    album,
+    albumArtist,
+    genre,
+    fileName,
+    provider,
     titleArtist,
     artistTitle,
     searchableText,
+    tokens: tokenizeSearchQuery(searchableText),
     titleWords: new Set(title.split(" ").filter(Boolean)),
     artistWords: new Set([artist, artists].filter(Boolean).join(" ").split(" ").filter(Boolean)),
-    albumWords: new Set([album, albumArtist].filter(Boolean).join(" ").split(" ").filter(Boolean))
+    albumWords: new Set([album, albumArtist].filter(Boolean).join(" ").split(" ").filter(Boolean)),
+    isLocal: track.resultSource === "library" || track.provider === "library"
   };
 }
 
@@ -105,12 +164,12 @@ export function scoreTrackSearchDocument(document, query) {
     return 0;
   }
 
-  const tokens = normalisedQuery.split(" ").filter(Boolean);
+  const tokens = tokenizeSearchQuery(normalisedQuery);
   if (!tokens.length || !tokens.every((token) => document.searchableText.includes(token))) {
     return Number.NEGATIVE_INFINITY;
   }
 
-  let score = 0;
+  let score = document.isLocal ? 35 : 0;
   if (document.title === normalisedQuery) {
     score += 260;
   }
@@ -157,62 +216,124 @@ export function scoreTrackSearchDocument(document, query) {
   return score;
 }
 
-export function createTrackSearchIndex({ maxEntries = 10000 } = {}) {
-  const documents = new Map();
-  const safeMaxEntries = Math.max(1, Number(maxEntries) || 1);
+export function buildTrackSearchIndex(tracks = []) {
+  const documents = (Array.isArray(tracks) ? tracks : [])
+    .filter(Boolean)
+    .map((track, sourceIndex) => createTrackSearchDocument(track, sourceIndex));
+  const exactTokenIndex = new Map();
+  const prefixTokenIndex = new Map();
 
-  function getDocument(track) {
-    const trackKey = String(track?.key || track?.trackId || track?.id || "").trim();
-    if (!trackKey) {
-      return createTrackSearchDocument(track);
+  documents.forEach((document, documentIndex) => {
+    document.tokens.forEach((token) => {
+      addIndexValue(exactTokenIndex, token, documentIndex);
+      const prefixLimit = Math.min(token.length, MAX_PREFIX_LENGTH);
+      for (let length = 1; length <= prefixLimit; length += 1) {
+        addIndexValue(prefixTokenIndex, token.slice(0, length), documentIndex);
+      }
+    });
+  });
+
+  return {
+    documents,
+    exactTokenIndex,
+    prefixTokenIndex
+  };
+}
+
+function getTokenCandidates(index, token) {
+  const indexedCandidates = unionSets(
+    index.exactTokenIndex.get(token),
+    index.prefixTokenIndex.get(token)
+  );
+  if (indexedCandidates.size) {
+    return indexedCandidates;
+  }
+
+  const fallback = new Set();
+  index.documents.forEach((document, documentIndex) => {
+    if (document.searchableText.includes(token)) {
+      fallback.add(documentIndex);
+    }
+  });
+  return fallback;
+}
+
+export function searchTrackIndex(index, query, { limit = Number.POSITIVE_INFINITY } = {}) {
+  const normalisedQuery = normaliseSearchText(query);
+  const queryTokens = tokenizeSearchQuery(normalisedQuery);
+  if (!normalisedQuery || !queryTokens.length || !index?.documents?.length) {
+    return [];
+  }
+
+  let candidateIndexes = null;
+  for (const token of queryTokens) {
+    candidateIndexes = intersectSets(candidateIndexes, getTokenCandidates(index, token));
+    if (!candidateIndexes.size) {
+      return [];
+    }
+  }
+
+  const maximumResults = Number.isFinite(Number(limit))
+    ? Math.max(0, Math.trunc(Number(limit)))
+    : Number.POSITIVE_INFINITY;
+
+  return Array.from(candidateIndexes)
+    .map((documentIndex) => {
+      const document = index.documents[documentIndex];
+      return {
+        document,
+        score: scoreTrackSearchDocument(document, normalisedQuery)
+      };
+    })
+    .filter((entry) => Number.isFinite(entry.score))
+    .sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+      return left.document.sourceIndex - right.document.sourceIndex;
+    })
+    .slice(0, maximumResults)
+    .map((entry) => entry.document.track);
+}
+
+export function createTrackSearchEngine({ maxIndexes = 18 } = {}) {
+  const indexes = new Map();
+  const maximumIndexes = Math.max(1, Math.trunc(Number(maxIndexes) || 18));
+
+  function getIndex(tracks, cacheKey = "") {
+    const resolvedKey = String(cacheKey || "").trim();
+    if (!resolvedKey) {
+      return buildTrackSearchIndex(tracks);
     }
 
-    const signature = createTrackSignature(track);
-    const cached = documents.get(trackKey);
-    if (cached?.signature === signature) {
-      documents.delete(trackKey);
-      documents.set(trackKey, cached);
+    const cached = indexes.get(resolvedKey);
+    if (cached) {
+      indexes.delete(resolvedKey);
+      indexes.set(resolvedKey, cached);
       return cached;
     }
 
-    const document = createTrackSearchDocument(track);
-    documents.delete(trackKey);
-    documents.set(trackKey, document);
-    while (documents.size > safeMaxEntries) {
-      documents.delete(documents.keys().next().value);
+    const index = buildTrackSearchIndex(tracks);
+    indexes.set(resolvedKey, index);
+    while (indexes.size > maximumIndexes) {
+      indexes.delete(indexes.keys().next().value);
     }
-    return document;
-  }
-
-  function search(tracks, query) {
-    const normalisedQuery = normaliseSearchText(query);
-    if (!normalisedQuery) {
-      return Array.isArray(tracks) ? [...tracks] : [];
-    }
-
-    return (Array.isArray(tracks) ? tracks : [])
-      .map((track, index) => {
-        const document = getDocument(track);
-        return {
-          track,
-          index,
-          score: scoreTrackSearchDocument(document, normalisedQuery)
-        };
-      })
-      .filter((entry) => Number.isFinite(entry.score))
-      .sort((left, right) => {
-        if (right.score !== left.score) {
-          return right.score - left.score;
-        }
-        return left.index - right.index;
-      })
-      .map((entry) => entry.track);
+    return index;
   }
 
   return {
-    search,
-    clear: () => documents.clear(),
-    getSize: () => documents.size
+    search(tracks, query, options = {}) {
+      return searchTrackIndex(getIndex(tracks, options.cacheKey), query, options);
+    },
+    clear() {
+      indexes.clear();
+    },
+    delete(cacheKey) {
+      return indexes.delete(String(cacheKey || "").trim());
+    },
+    getSize() {
+      return indexes.size;
+    }
   };
 }
 
@@ -233,15 +354,19 @@ export function createTimedLruCache({
   now = () => Date.now()
 } = {}) {
   const entries = new Map();
-  const safeMaxEntries = Math.max(1, Number(maxEntries) || 1);
-  const safeTtlMs = Math.max(0, Number(ttlMs) || 0);
+  const maximumEntries = Math.max(1, Math.trunc(Number(maxEntries) || 40));
+  const lifetimeMs = Math.max(0, Number(ttlMs) || 0);
+
+  function isExpired(entry) {
+    return Boolean(entry && lifetimeMs > 0 && entry.expiresAt <= now());
+  }
 
   function get(key) {
     const entry = entries.get(key);
     if (!entry) {
       return null;
     }
-    if (entry.expiresAt <= now()) {
+    if (isExpired(entry)) {
       entries.delete(key);
       return null;
     }
@@ -255,10 +380,10 @@ export function createTimedLruCache({
     entries.delete(key);
     entries.set(key, {
       value: clone(value),
-      expiresAt: now() + safeTtlMs
+      expiresAt: lifetimeMs > 0 ? now() + lifetimeMs : Number.POSITIVE_INFINITY
     });
 
-    while (entries.size > safeMaxEntries) {
+    while (entries.size > maximumEntries) {
       entries.delete(entries.keys().next().value);
     }
   }
@@ -266,8 +391,29 @@ export function createTimedLruCache({
   return {
     get,
     set,
-    clear: () => entries.clear(),
-    getSize: () => entries.size
+    has(key) {
+      const entry = entries.get(key);
+      if (!entry || isExpired(entry)) {
+        entries.delete(key);
+        return false;
+      }
+      return true;
+    },
+    delete(key) {
+      return entries.delete(key);
+    },
+    clear() {
+      entries.clear();
+    },
+    keys() {
+      return entries.keys();
+    },
+    get size() {
+      return entries.size;
+    },
+    getSize() {
+      return entries.size;
+    }
   };
 }
 
@@ -295,7 +441,7 @@ export function buildSearchCacheKey({
 
 export function mergeSearchTracks(localTracks, remoteTracks, { isEquivalent } = {}) {
   const result = [];
-  const keyIndexes = new Map();
+  const seenKeys = new Set();
   const equivalence = typeof isEquivalent === "function"
     ? isEquivalent
     : (left, right) => Boolean(left?.key && right?.key && left.key === right.key);
@@ -306,7 +452,7 @@ export function mergeSearchTracks(localTracks, remoteTracks, { isEquivalent } = 
     }
 
     const key = String(track.key || "").trim();
-    if (key && keyIndexes.has(key)) {
+    if (key && seenKeys.has(key)) {
       continue;
     }
     if (result.some((candidate) => equivalence(candidate, track))) {
@@ -314,7 +460,7 @@ export function mergeSearchTracks(localTracks, remoteTracks, { isEquivalent } = 
     }
 
     if (key) {
-      keyIndexes.set(key, result.length);
+      seenKeys.add(key);
     }
     result.push(track);
   }
