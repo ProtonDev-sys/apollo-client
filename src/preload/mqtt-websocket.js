@@ -166,6 +166,7 @@ class MqttWebSocketClient extends EventEmitter {
     this.receiveBuffer = Buffer.alloc(0);
     this.nextPacketId = 1;
     this.pendingAcks = new Map();
+    this.dataQueue = Promise.resolve();
     this.connectTimeoutHandle = null;
     this.reconnectHandle = null;
     this.keepAliveHandle = null;
@@ -276,7 +277,7 @@ class MqttWebSocketClient extends EventEmitter {
 
     socket.onmessage = (event) => {
       if (this.socket === socket && !this.ended) {
-        void this.handleSocketData(event?.data);
+        void this.handleSocketData(event?.data, socket);
       }
     };
 
@@ -315,7 +316,12 @@ class MqttWebSocketClient extends EventEmitter {
     this.reconnectHandle.unref?.();
   }
 
-  async handleSocketData(data) {
+  handleSocketData(data, socket = this.socket) {
+    this.dataQueue = this.dataQueue.then(() => this.consumeSocketData(data, socket));
+    return this.dataQueue;
+  }
+
+  async consumeSocketData(data, socket) {
     try {
       let bytes;
       if (data instanceof ArrayBuffer) {
@@ -328,6 +334,10 @@ class MqttWebSocketClient extends EventEmitter {
         bytes = Buffer.from(data || []);
       }
 
+      if (this.socket !== socket || this.ended) {
+        return;
+      }
+
       this.receiveBuffer = concatBuffers(this.receiveBuffer, bytes);
       while (this.receiveBuffer.length) {
         const frame = parsePacketFrame(this.receiveBuffer, this.options.maxPacketBytes);
@@ -338,9 +348,12 @@ class MqttWebSocketClient extends EventEmitter {
         this.handlePacket(frame.header, frame.body);
       }
     } catch (error) {
+      if (this.socket !== socket || this.ended) {
+        return;
+      }
       this.emit("error", error);
       try {
-        this.socket?.close();
+        socket?.close();
       } catch {
         // Ignore teardown failures after malformed broker data.
       }

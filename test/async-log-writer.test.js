@@ -79,7 +79,9 @@ test("async logger bounds queued memory and records dropped lines", async () => 
   assert.match(operations.join(""), /dropped/);
 });
 
-test("log text is byte bounded", () => {
+test("log text is exactly byte bounded without corrupting UTF-8", () => {
   const value = sanitiseLogText("é".repeat(1000), 100);
-  assert.ok(Buffer.byteLength(value) <= 103);
+  assert.ok(Buffer.byteLength(value) <= 100);
+  assert.doesNotMatch(value, /�/);
+  assert.match(value, /\.\.\.$/);
 });

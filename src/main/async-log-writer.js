@@ -17,7 +17,17 @@ function sanitiseLogText(value, maxBytes = DEFAULT_MAX_LINE_BYTES) {
     return text;
   }
 
-  return `${buffer.subarray(0, Math.max(0, maxBytes - 3)).toString("utf8")}...`;
+  const byteLimit = Math.max(0, Math.trunc(Number(maxBytes) || 0));
+  const suffix = Buffer.from("...", "utf8");
+  if (byteLimit <= suffix.length) {
+    return suffix.subarray(0, byteLimit).toString("utf8");
+  }
+
+  let end = byteLimit - suffix.length;
+  while (end > 0 && (buffer[end] & 0xc0) === 0x80) {
+    end -= 1;
+  }
+  return Buffer.concat([buffer.subarray(0, end), suffix]).toString("utf8");
 }
 
 function createAsyncLogWriter({

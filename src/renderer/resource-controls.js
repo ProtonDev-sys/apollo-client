@@ -46,7 +46,7 @@ export function createIntervalGate(intervalMs, { now = () => Date.now() } = {}) 
         return false;
       }
 
-      if (!force && currentTime - lastRunAt < interval) {
+      if (!force && currentTime >= lastRunAt && currentTime - lastRunAt < interval) {
         return false;
       }
 

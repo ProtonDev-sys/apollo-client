@@ -43,6 +43,8 @@ test("interval gate throttles hot paths and supports forced updates", async () =
   assert.equal(gate.shouldRun(), false);
   currentTime = 1350;
   assert.equal(gate.shouldRun(), true);
+  currentTime = 1200;
+  assert.equal(gate.shouldRun(), true);
   gate.reset();
   assert.equal(gate.shouldRun(), true);
 });

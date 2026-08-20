@@ -180,3 +180,38 @@ test("native adapter bounds acknowledgement memory and expires missing acknowled
   assert.equal(failures.filter((message) => /timed out/.test(message)).length, 2);
   client.end(true);
 });
+
+
+test("native adapter serializes asynchronous Blob frames in arrival order", async () => {
+  const { client, socket } = await connectClient();
+  const messages = [];
+  client.on("message", (topic, payload) => messages.push([topic, payload.toString("utf8")]));
+  const firstPacket = createPacket(0x30, Buffer.concat([
+    encodeUtf8String("first"),
+    Buffer.from("1")
+  ]));
+  const secondPacket = createPacket(0x30, Buffer.concat([
+    encodeUtf8String("second"),
+    Buffer.from("2")
+  ]));
+
+  let releaseFirst;
+  const firstGate = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  class DelayedBlob extends Blob {
+    async arrayBuffer() {
+      await firstGate;
+      return super.arrayBuffer();
+    }
+  }
+
+  const firstTask = client.handleSocketData(new DelayedBlob([firstPacket]), socket);
+  const secondTask = client.handleSocketData(new Blob([secondPacket]), socket);
+  await new Promise(setImmediate);
+  assert.deepEqual(messages, []);
+  releaseFirst();
+  await Promise.all([firstTask, secondTask]);
+  assert.deepEqual(messages, [["first", "1"], ["second", "2"]]);
+  client.end(true);
+});

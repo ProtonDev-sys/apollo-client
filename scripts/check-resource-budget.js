@@ -18,9 +18,10 @@ const FORBIDDEN_PACKAGED_PATHS = Object.freeze([
 
 function getFileSize(filePath) {
   try {
-    return fs.statSync(filePath).size;
+    const stats = fs.statSync(filePath);
+    return stats.isFile() ? stats.size : null;
   } catch {
-    return 0;
+    return null;
   }
 }
 
@@ -91,16 +92,26 @@ function collectResourceBudgetErrors(projectRoot, budgets = DEFAULT_BUDGETS) {
     }
   }
 
-  const measured = {
-    mainBytes: getFileSize(path.join(projectRoot, "main.js")),
-    preloadBytes: getFileSize(path.join(projectRoot, "preload.js")),
-    rendererBytes: getFileSize(path.join(projectRoot, "src", "renderer.js")),
-    packagedSourceBytes: calculatePackagedSourceBytes(projectRoot)
+  const requiredTargets = {
+    mainBytes: "main.js",
+    preloadBytes: "preload.js",
+    rendererBytes: path.join("src", "renderer.js")
   };
+  const measured = {};
+  for (const [name, relativePath] of Object.entries(requiredTargets)) {
+    const size = getFileSize(path.join(projectRoot, relativePath));
+    if (size === null) {
+      errors.push(`Required resource budget target is missing or unreadable: ${relativePath}`);
+      measured[name] = 0;
+    } else {
+      measured[name] = size;
+    }
+  }
+  measured.packagedSourceBytes = calculatePackagedSourceBytes(projectRoot);
 
   for (const [name, limit] of Object.entries(budgets)) {
-    if (measured[name] > limit) {
-      errors.push(`${name} exceeds its resource budget: ${measured[name]} > ${limit} bytes`);
+    if (measured[name] >= limit) {
+      errors.push(`${name} exceeds its exclusive resource budget: ${measured[name]} >= ${limit} bytes`);
     }
   }
 
@@ -133,6 +144,7 @@ module.exports = {
   FORBIDDEN_PACKAGED_PATHS,
   calculatePackagedSourceBytes,
   collectResourceBudgetErrors,
+  getFileSize,
   run,
   walkFiles
 };

@@ -80,3 +80,30 @@ test("package budget rejects oversized app.asar files", (context) => {
   assert.equal(checkPackageBudget({ projectRoot: root, maxAsarBytes: 10 }).ok, false);
   assert.equal(checkPackageBudget({ projectRoot: root, maxAsarBytes: 30 }).ok, true);
 });
+
+
+test("resource budget rejects unavailable required targets and exact exclusive limits", (context) => {
+  const root = createProject();
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.rmSync(path.join(root, "preload.js"));
+  let errors = collectResourceBudgetErrors(root).errors.join("\n");
+  assert.match(errors, /missing or unreadable: preload\.js/);
+
+  fs.writeFileSync(path.join(root, "preload.js"), "module.exports = {};\n");
+  const mainSize = fs.statSync(path.join(root, "main.js")).size;
+  errors = collectResourceBudgetErrors(root, { mainBytes: mainSize }).errors.join("\n");
+  assert.match(errors, /mainBytes exceeds its exclusive resource budget/);
+});
+
+test("package budget rejects non-finite and non-positive limits", (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "apollo-package-budget-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  assert.throws(
+    () => checkPackageBudget({ projectRoot: root, maxAsarBytes: Number.POSITIVE_INFINITY }),
+    /finite positive number/
+  );
+  assert.throws(
+    () => checkPackageBudget({ projectRoot: root, maxAsarBytes: 0 }),
+    /finite positive number/
+  );
+});
