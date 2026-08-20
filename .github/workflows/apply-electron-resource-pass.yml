@@ -1,0 +1,63 @@
+name: Apply Electron resource pass
+
+on:
+  push:
+    branches:
+      - codex/electron-resource-budget-20260820
+
+concurrency:
+  group: electron-resource-pass
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    name: Apply and validate resource controls
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: codex/electron-resource-budget-20260820
+          fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - name: Apply runtime and renderer controls
+        run: |
+          python3 scripts/apply-electron-resource-pass.py
+          git rm src/desktop/listen-along-signaling.js src/desktop/runtime-assets.js
+      - name: Regenerate compact dependency lockfile
+        run: npm install --package-lock-only --ignore-scripts
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Validate Electron resource pass
+        run: |
+          npm run check:runtime
+          npm run check:resources
+          npm run check:syntax
+          npm test
+          npm run audit:deps
+          git diff --check
+      - name: Commit validated application files
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/apply-electron-resource-pass.yml scripts/apply-electron-resource-pass.py
+          git add \
+            main.js \
+            discord-presence.js \
+            src/preload/runtime-assets.js \
+            src/renderer.js \
+            src/styles.css \
+            package-lock.json
+          git commit -m "Reduce Electron startup, memory, CPU, and package size"
+          git push origin HEAD:codex/electron-resource-budget-20260820
