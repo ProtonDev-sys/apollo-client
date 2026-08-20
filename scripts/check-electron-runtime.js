@@ -7,11 +7,67 @@ const FORBIDDEN_TAURI_ENTRIES = Object.freeze([
   "src-tauri",
   "tauri.conf.json",
   "tauri.conf.json5",
+  "tauri.conf.toml",
   "Tauri.toml"
 ]);
+const RUNTIME_DIRECTORIES = Object.freeze(["src"]);
+const RUNTIME_ROOT_FILES = Object.freeze([
+  "main.js",
+  "preload.js",
+  "discord-presence.js",
+  "discord-social-bridge.js"
+]);
+const SCANNED_RUNTIME_EXTENSIONS = new Set([
+  ".cjs",
+  ".css",
+  ".html",
+  ".js",
+  ".json",
+  ".jsx",
+  ".mjs",
+  ".rs",
+  ".toml",
+  ".ts",
+  ".tsx"
+]);
+const TAURI_RUNTIME_REFERENCE_PATTERN =
+  /@tauri-apps\/|\b__TAURI__\b|\btauri::|\btauri:\/\/|\btauri\.conf(?:\.json5?|\.toml)?\b/i;
 
 function isDirectElectronStartCommand(value) {
   return String(value || "").trim() === "electron .";
+}
+
+function walkFiles(directoryPath) {
+  if (!fs.existsSync(directoryPath)) {
+    return [];
+  }
+
+  return fs.readdirSync(directoryPath, { withFileTypes: true })
+    .flatMap((entry) => {
+      const resolvedPath = path.join(directoryPath, entry.name);
+      if (entry.isDirectory()) {
+        return walkFiles(resolvedPath);
+      }
+      return entry.isFile() ? [resolvedPath] : [];
+    });
+}
+
+function validateRuntimeFile(projectRoot, filePath, errors) {
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    return;
+  }
+
+  if (!SCANNED_RUNTIME_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
+    return;
+  }
+
+  const source = fs.readFileSync(filePath, "utf8");
+  if (!TAURI_RUNTIME_REFERENCE_PATTERN.test(source)) {
+    return;
+  }
+
+  const relativePath = path.relative(projectRoot, filePath).split(path.sep).join("/");
+  errors.push(`Tauri runtime reference is not allowed in ${relativePath}.`);
 }
 
 function collectElectronRuntimeErrors(projectRoot) {
@@ -65,6 +121,15 @@ function collectElectronRuntimeErrors(projectRoot) {
     }
   }
 
+  for (const directory of RUNTIME_DIRECTORIES) {
+    for (const filePath of walkFiles(path.join(projectRoot, directory))) {
+      validateRuntimeFile(projectRoot, filePath, errors);
+    }
+  }
+  for (const fileName of RUNTIME_ROOT_FILES) {
+    validateRuntimeFile(projectRoot, path.join(projectRoot, fileName), errors);
+  }
+
   return errors;
 }
 
@@ -86,7 +151,13 @@ if (require.main === module) {
 
 module.exports = {
   FORBIDDEN_TAURI_ENTRIES,
+  RUNTIME_DIRECTORIES,
+  RUNTIME_ROOT_FILES,
+  SCANNED_RUNTIME_EXTENSIONS,
+  TAURI_RUNTIME_REFERENCE_PATTERN,
   isDirectElectronStartCommand,
+  walkFiles,
+  validateRuntimeFile,
   collectElectronRuntimeErrors,
   run
 };
