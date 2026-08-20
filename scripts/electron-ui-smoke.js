@@ -136,6 +136,11 @@ async function run() {
     )`
   );
 
+  window.show();
+  window.focus();
+  window.webContents.focus();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
   const initialSnapshot = await window.webContents.executeJavaScript(`
     (() => {
       const status = document.querySelector(".apollo-interface-status");
