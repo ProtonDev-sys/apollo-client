@@ -8,11 +8,12 @@ const FORBIDDEN_ROOT_PATHS = [
   "tauri.conf.json5",
   "tauri.conf.toml"
 ];
-const SOURCE_DIRECTORIES = [
-  "src",
-  "scripts",
-  "test",
-  "docs"
+const RUNTIME_DIRECTORIES = ["src"];
+const RUNTIME_ROOT_FILES = [
+  "main.js",
+  "preload.js",
+  "discord-presence.js",
+  "discord-social-bridge.js"
 ];
 const TAURI_REFERENCE_PATTERN = /@tauri-apps\/|\btauri::|\b__TAURI__\b|\btauri\.conf(?:\.json5?|\.toml)?\b/i;
 
@@ -68,6 +69,23 @@ function validateElectronPackage(packageJson) {
   return errors;
 }
 
+function validateRuntimeFile(projectRoot, filePath, errors) {
+  if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+    return;
+  }
+
+  const relativePath = path.relative(projectRoot, filePath).replaceAll(path.sep, "/");
+  const extension = path.extname(filePath).toLowerCase();
+  if (![".js", ".mjs", ".cjs", ".json", ".html", ".css", ".toml", ".rs"].includes(extension)) {
+    return;
+  }
+
+  const content = fs.readFileSync(filePath, "utf8");
+  if (TAURI_REFERENCE_PATTERN.test(content)) {
+    errors.push(`Tauri runtime reference is not permitted in ${relativePath}.`);
+  }
+}
+
 function validateElectronBoundary(projectRoot = PROJECT_ROOT) {
   const errors = validateElectronPackage(readPackageJson(projectRoot));
 
@@ -77,23 +95,13 @@ function validateElectronBoundary(projectRoot = PROJECT_ROOT) {
     }
   });
 
-  SOURCE_DIRECTORIES.forEach((relativeDirectory) => {
+  RUNTIME_DIRECTORIES.forEach((relativeDirectory) => {
     walkFiles(path.join(projectRoot, relativeDirectory)).forEach((filePath) => {
-      const relativePath = path.relative(projectRoot, filePath).replaceAll(path.sep, "/");
-      if (relativePath === "scripts/check-electron-platform.js") {
-        return;
-      }
-
-      const extension = path.extname(filePath).toLowerCase();
-      if (![".js", ".mjs", ".cjs", ".json", ".html", ".css", ".md", ".toml", ".rs"].includes(extension)) {
-        return;
-      }
-
-      const content = fs.readFileSync(filePath, "utf8");
-      if (TAURI_REFERENCE_PATTERN.test(content)) {
-        errors.push(`Tauri runtime reference is not permitted in ${relativePath}.`);
-      }
+      validateRuntimeFile(projectRoot, filePath, errors);
     });
+  });
+  RUNTIME_ROOT_FILES.forEach((relativePath) => {
+    validateRuntimeFile(projectRoot, path.join(projectRoot, relativePath), errors);
   });
 
   return errors;
@@ -116,9 +124,12 @@ if (require.main === module) {
 
 module.exports = {
   FORBIDDEN_ROOT_PATHS,
+  RUNTIME_DIRECTORIES,
+  RUNTIME_ROOT_FILES,
   TAURI_REFERENCE_PATTERN,
   readPackageJson,
   validateElectronBoundary,
   validateElectronPackage,
+  validateRuntimeFile,
   walkFiles
 };

@@ -78,6 +78,12 @@ import {
   PROVIDER_ID_KEYS
 } from "./renderer/track-model.js";
 import { createPollingController } from "./renderer/polling-controller.js";
+import {
+  createLruTtlCache,
+  createTrackSearchEngine,
+  mapWithConcurrency,
+  shouldSearchRemote
+} from "./renderer/search-engine.js";
 const desktopDiscordDefaults = window.apolloDesktop?.discordPresenceDefaults || {};
 let desktopAppConfig = window.apolloDesktop?.appConfig || {};
 const desktopRuntimeAssets = window.apolloDesktop?.runtimeAssets || null;
@@ -345,8 +351,17 @@ const renderRevisions = {
 const durationCache = loadPersistedDurationCache();
 const playbackUrlCache = new Map();
 const pendingPlaybackUrlCache = new Map();
-const searchResultCache = new Map();
-const artistSearchCache = new Map();
+const searchResultCache = createLruTtlCache({
+  maxEntries: 48,
+  ttlMs: 2 * 60 * 1000
+});
+const artistSearchCache = createLruTtlCache({
+  maxEntries: 32,
+  ttlMs: 10 * 60 * 1000
+});
+const localTrackSearch = createTrackSearchEngine({
+  maxIndexes: 18
+});
 const artistProfileCache = new Map();
 const artistTracksCache = new Map();
 const artistReleasesCache = new Map();
@@ -1317,6 +1332,7 @@ function clearApolloData() {
   state.playbackCurrentSource = "standalone";
   searchResultCache.clear();
   artistSearchCache.clear();
+  localTrackSearch.clear();
   artistProfileCache.clear();
   artistTracksCache.clear();
   artistReleasesCache.clear();
@@ -1501,15 +1517,6 @@ function readCachedSearchResult(query, options = {}) {
 function writeCachedSearchResult(query, result, options = {}) {
   const cacheKey = buildSearchCacheKey(query, options);
   searchResultCache.set(cacheKey, structuredClone(result));
-
-  if (searchResultCache.size <= 20) {
-    return;
-  }
-
-  const oldestKey = searchResultCache.keys().next().value;
-  if (oldestKey) {
-    searchResultCache.delete(oldestKey);
-  }
 }
 
 function normaliseArtist(artist = {}) {
@@ -1569,15 +1576,6 @@ function readCachedArtistSearchResult(query) {
 function writeCachedArtistSearchResult(query, result) {
   const cacheKey = `${state.apiBase}::${String(query || "").trim().toLowerCase()}`;
   artistSearchCache.set(cacheKey, structuredClone(result));
-
-  if (artistSearchCache.size <= 20) {
-    return;
-  }
-
-  const oldestKey = artistSearchCache.keys().next().value;
-  if (oldestKey) {
-    artistSearchCache.delete(oldestKey);
-  }
 }
 
 function getArtistBrowseSummary(artistId = state.artistBrowse?.id || "") {
@@ -2287,7 +2285,7 @@ async function fetchSearchResults(query) {
 async function fetchRemoteSearchResults(query, { signal } = {}) {
   const trimmedQuery = String(query || "").trim();
   const enabledProviders = getEnabledProviders();
-  if (!trimmedQuery || !enabledProviders.length) {
+  if (!shouldSearchRemote(trimmedQuery) || !enabledProviders.length) {
     return {
       tracks: [],
       warnings: []
@@ -2323,7 +2321,7 @@ async function fetchRemoteSearchResults(query, { signal } = {}) {
 
 async function fetchArtistSearchResults(query, { signal } = {}) {
   const trimmedQuery = String(query || "").trim();
-  if (!trimmedQuery) {
+  if (!shouldSearchRemote(trimmedQuery)) {
     return [];
   }
 
@@ -2397,8 +2395,10 @@ async function fetchArtistReleases(artistId, { signal } = {}) {
 }
 
 async function enrichArtistSearchResults(artists, { signal } = {}) {
-  return Promise.all(
-    (Array.isArray(artists) ? artists : []).map(async (artist) => {
+  return mapWithConcurrency(
+    Array.isArray(artists) ? artists : [],
+    3,
+    async (artist) => {
       try {
         const [profile, releases] = await Promise.all([
           fetchArtistProfile(artist.id, { signal }),
@@ -2417,7 +2417,7 @@ async function enrichArtistSearchResults(artists, { signal } = {}) {
 
         return normaliseArtist(artist);
       }
-    })
+    }
   );
 }
 
@@ -2440,17 +2440,25 @@ function isSearchRequestCurrent(requestId, query) {
     && query === String(state.query || "").trim();
 }
 
-function matchesTrackQuery(track, query) {
-  const normalizedQuery = normaliseMetadataText(query);
-  if (!normalizedQuery) {
-    return true;
+function getLocalSearchCollection() {
+  if (state.selectedPlaylistId === "liked-tracks") {
+    return {
+      tracks: Array.from(likedTracks.values()),
+      cacheKey: `liked:${renderRevisions.likes}`
+    };
   }
 
-  return [
-    getTrackNormalizedText(track, "normalizedTitle", "title"),
-    getTrackNormalizedText(track, "normalizedArtist", "artist"),
-    getTrackNormalizedText(track, "normalizedAlbum", "album")
-  ].some((value) => value.includes(normalizedQuery));
+  if (state.selectedPlaylistId && state.selectedPlaylistId !== "all-tracks") {
+    return {
+      tracks: state.playlists.find((playlist) => playlist.id === state.selectedPlaylistId)?.tracks || [],
+      cacheKey: `playlist:${state.selectedPlaylistId}:${renderRevisions.playlists}`
+    };
+  }
+
+  return {
+    tracks: state.libraryTracks,
+    cacheKey: `library:${renderRevisions.library}`
+  };
 }
 
 function getLocalSearchResults(query) {
@@ -2459,19 +2467,11 @@ function getLocalSearchResults(query) {
     return [];
   }
 
-  const baseTracks = (() => {
-    if (state.selectedPlaylistId === "liked-tracks") {
-      return Array.from(likedTracks.values());
-    }
-
-    if (state.selectedPlaylistId && state.selectedPlaylistId !== "all-tracks") {
-      return state.playlists.find((playlist) => playlist.id === state.selectedPlaylistId)?.tracks || [];
-    }
-
-    return state.libraryTracks;
-  })();
-
-  return baseTracks.filter((track) => matchesTrackQuery(track, trimmedQuery));
+  const collection = getLocalSearchCollection();
+  return localTrackSearch.search(collection.tracks, trimmedQuery, {
+    cacheKey: collection.cacheKey,
+    limit: 250
+  });
 }
 
 function isCollectionScopedSearch() {
@@ -7872,7 +7872,9 @@ async function runSearch({ historySource = "", historyReplace = false } = {}) {
   const searchWarnings = [];
   let artistResults = [];
   let remoteResults = [];
-  let remotePending = !collectionScopedSearch && getEnabledProviders().length > 0;
+  let remotePending = !collectionScopedSearch
+    && shouldSearchRemote(query)
+    && getEnabledProviders().length > 0;
   let searchError = null;
 
   const publishSearchProgress = () => {
