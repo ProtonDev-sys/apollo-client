@@ -27,7 +27,41 @@ jobs:
           node-version: 24.x
           cache: npm
       - name: Apply compact Electron runtime
-        run: node scripts/apply-electron-only-compact.mjs
+        shell: bash
+        run: |
+          node scripts/apply-electron-only-compact.mjs
+          python3 - <<'PY'
+          from pathlib import Path
+
+          preload_path = Path("preload.js")
+          preload = preload_path.read_text(encoding="utf-8")
+          if "appRootPath: __dirname" not in preload:
+              marker = "const runtimeAssets = createRuntimeAssetsService({"
+              start = preload.index(marker)
+              end = preload.index("});", start)
+              block = preload[start:end]
+              block = block.replace(
+                  "  runtimeInfo,\n",
+                  "  runtimeInfo,\n  appRootPath: __dirname,\n",
+                  1,
+              )
+              preload = preload[:start] + block + preload[end:]
+              preload_path.write_text(preload, encoding="utf-8")
+
+          runtime_assets_path = Path("src/preload/runtime-assets.js")
+          runtime_assets = runtime_assets_path.read_text(encoding="utf-8")
+          header_start = runtime_assets.index("function createRuntimeAssetsService({")
+          header_end = runtime_assets.index("}) {", header_start)
+          header = runtime_assets[header_start:header_end]
+          if "appRootPath" not in header:
+              header = header.replace(
+                  "  runtimeInfo,\n",
+                  "  runtimeInfo,\n  appRootPath,\n",
+                  1,
+              )
+              runtime_assets = runtime_assets[:header_start] + header + runtime_assets[header_end:]
+              runtime_assets_path.write_text(runtime_assets, encoding="utf-8")
+          PY
       - name: Refresh dependency lock
         run: npm install --package-lock-only --ignore-scripts
       - name: Install build dependencies without downloading Electron
@@ -54,9 +88,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          rm -f scripts/.electron-compact-transform.mjs
           git rm -f scripts/apply-electron-only-compact.mjs
           git rm -rf scripts/.electron-compact-payload
-          git rm -f scripts/.electron-compact-transform.mjs
           git add -A
           git commit -m "Make Apollo a compact dependency-free Electron app"
           git push origin HEAD:codex/electron-only-minimal-20260820
