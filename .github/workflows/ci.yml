@@ -136,7 +136,7 @@ jobs:
           retention-days: 7
 
   windows-package:
-    name: Compact Windows installer
+    name: Compact Windows distributions
     runs-on: windows-latest
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
@@ -180,31 +180,89 @@ jobs:
 
           Test-PackagedLaunch 'hardware' @()
           Test-PackagedLaunch 'software' @('--disable-gpu')
-      - name: Enforce and report installer size
+      - name: Create and exercise the portable archive
+        shell: pwsh
+        run: |
+          $sevenZip = (Get-Command 7z.exe -ErrorAction Stop).Source
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          $releaseDirectory = (Resolve-Path release).Path
+          $archive = Join-Path $releaseDirectory "Apollo-Client-Portable-$version.7z"
+
+          Push-Location release/win-unpacked
+          try {
+            & $sevenZip a -t7z -mx=9 -m0=lzma2 -ms=on $archive '.\*'
+            if ($LASTEXITCODE -ne 0) {
+              throw "7-Zip exited with code $LASTEXITCODE."
+            }
+          } finally {
+            Pop-Location
+          }
+
+          $extractDirectory = Join-Path $env:RUNNER_TEMP 'apollo-portable-extracted'
+          Remove-Item $extractDirectory -Recurse -Force -ErrorAction SilentlyContinue
+          & $sevenZip x $archive "-o$extractDirectory" -y
+          if ($LASTEXITCODE -ne 0) {
+            throw "Portable archive extraction exited with code $LASTEXITCODE."
+          }
+
+          $portableExe = Join-Path $extractDirectory 'Apollo Client.exe'
+          if (-not (Test-Path $portableExe)) {
+            throw 'Portable archive does not contain the Electron executable.'
+          }
+          $process = Start-Process $portableExe -ArgumentList @(
+            '--disable-gpu',
+            "--user-data-dir=$(Join-Path $env:RUNNER_TEMP 'apollo-portable-user')"
+          ) -PassThru
+          Start-Sleep -Seconds 8
+          if ($process.HasExited) {
+            throw 'The extracted portable application exited during smoke testing.'
+          }
+          & taskkill.exe /PID $process.Id /T /F | Out-Null
+      - name: Enforce and report Windows sizes
         shell: pwsh
         run: |
           $installer = Get-ChildItem release -Filter 'Apollo-Client-Setup-*.exe' | Select-Object -First 1
+          $portable = Get-ChildItem release -Filter 'Apollo-Client-Portable-*.7z' | Select-Object -First 1
           if (-not $installer) {
             throw 'Windows installer was not generated.'
           }
-          $maxBytes = 96000000
-          if ($installer.Length -gt $maxBytes) {
-            throw "Windows installer exceeds the $maxBytes-byte budget: $($installer.Length) bytes."
+          if (-not $portable) {
+            throw 'Windows portable archive was not generated.'
           }
+
+          $maxInstallerBytes = 96000000
+          $maxPortableBytes = 96000000
+          if ($installer.Length -gt $maxInstallerBytes) {
+            throw "Windows installer exceeds the $maxInstallerBytes-byte budget: $($installer.Length) bytes."
+          }
+          if ($portable.Length -gt $maxPortableBytes) {
+            throw "Windows portable archive exceeds the $maxPortableBytes-byte budget: $($portable.Length) bytes."
+          }
+
           $unpackedBytes = (Get-ChildItem release/win-unpacked -Recurse -File | Measure-Object Length -Sum).Sum
           "Windows installer: $($installer.Length) bytes"
+          "Windows portable archive: $($portable.Length) bytes"
           "Windows unpacked runtime: $unpackedBytes bytes"
           @(
             '### Windows package size',
             '',
             "- installer: $($installer.Length) bytes",
+            "- portable 7-Zip archive: $($portable.Length) bytes",
             "- unpacked runtime: $unpackedBytes bytes",
-            "- installer budget: $maxBytes bytes"
+            "- installer budget: $maxInstallerBytes bytes",
+            "- portable budget: $maxPortableBytes bytes"
           ) | Add-Content $env:GITHUB_STEP_SUMMARY
       - name: Upload Windows installer
         uses: actions/upload-artifact@v7
         with:
           name: apollo-client-windows-installer
           path: release/Apollo-Client-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload Windows portable archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: apollo-client-windows-portable
+          path: release/Apollo-Client-Portable-*.7z
           if-no-files-found: error
           retention-days: 7
