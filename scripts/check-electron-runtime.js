@@ -3,12 +3,14 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
+const ELECTRON_PRUNE_HOOK = "scripts/prune-electron-runtime.js";
 const REQUIRED_RUNTIME_FILES = Object.freeze([
   "main.js",
   "preload.js",
   "src/index.html",
   "src/renderer.js",
-  "scripts/build-app.js"
+  "scripts/build-app.js",
+  ELECTRON_PRUNE_HOOK
 ]);
 const ALLOWED_DEVELOPMENT_DEPENDENCIES = new Set([
   "electron",
@@ -136,6 +138,9 @@ function collectElectronRuntimeErrors(projectRoot) {
   if (packageJson.build?.npmRebuild !== false) {
     errors.push("Electron Builder must skip native dependency rebuilding for the dependency-free runtime.");
   }
+  if (packageJson.build?.afterPack !== ELECTRON_PRUNE_HOOK) {
+    errors.push(`Electron Builder must run the ${ELECTRON_PRUNE_HOOK} hook.`);
+  }
   if (!hasDistFileSet(packageJson.build?.files)) {
     errors.push("Electron Builder must package only the generated dist-app runtime.");
   }
@@ -199,6 +204,7 @@ if (require.main === module) {
 
 module.exports = {
   ALLOWED_DEVELOPMENT_DEPENDENCIES,
+  ELECTRON_PRUNE_HOOK,
   IGNORED_DIRECTORIES,
   REQUIRED_RUNTIME_FILES,
   TEXT_EXTENSIONS,
