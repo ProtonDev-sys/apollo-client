@@ -8,7 +8,7 @@
     "start": "electron .",
     "check:syntax": "node scripts/check-syntax.js",
     "test": "node --test",
-    "test:ui": "electron scripts/electron-ui-smoke.js",
+    "test:ui": "electron --no-sandbox scripts/electron-ui-smoke.js",
     "audit:deps": "npm audit --omit=dev",
     "verify": "npm run check:syntax && npm test && npm run audit:deps",
     "build:discord-social-helper": "scripts\\build-discord-social-helper.cmd",
