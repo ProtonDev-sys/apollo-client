@@ -1,7 +1,7 @@
 const SEARCH_MARK_PATTERN = /\p{M}+/gu;
 const SEARCH_SEPARATOR_PATTERN = /[^\p{L}\p{N}]+/gu;
-const MAX_PREFIX_LENGTH = 16;
 const SUBSTRING_GRAM_LENGTH = 3;
+const MAX_PREFIX_LENGTH = SUBSTRING_GRAM_LENGTH;
 
 export function normaliseSearchText(value) {
   return String(value || "")

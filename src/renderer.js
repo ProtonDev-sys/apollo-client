@@ -361,7 +361,7 @@ const artistSearchCache = createTimedLruCache({
   ttlMs: 10 * 60 * 1000
 });
 const localTrackSearch = createTrackSearchEngine({
-  maxIndexes: 18
+  maxIndexes: 8
 });
 const artistProfileCache = new Map();
 const artistTracksCache = new Map();
@@ -2474,7 +2474,11 @@ function getLocalSearchCollection() {
 
 function getLocalSearchResults(query) {
   const trimmedQuery = String(query || "").trim();
-  if (!trimmedQuery || !state.settings.search.includeLibraryResults) {
+  if (!trimmedQuery) {
+    return [];
+  }
+
+  if (!state.settings.search.includeLibraryResults && !isCollectionScopedSearch()) {
     return [];
   }
 
