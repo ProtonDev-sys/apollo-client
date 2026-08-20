@@ -10,6 +10,55 @@ permissions:
   contents: read
 
 jobs:
+  apply-resource-pass:
+    name: Apply validated Electron resource controls
+    if: github.event_name == 'pull_request' && github.head_ref == 'codex/electron-resource-budget-20260820'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: codex/electron-resource-budget-20260820
+          fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - name: Apply runtime and renderer controls
+        run: |
+          python3 scripts/apply-electron-resource-pass.py
+          git rm src/desktop/listen-along-signaling.js src/desktop/runtime-assets.js
+      - name: Regenerate compact dependency lockfile
+        run: npm install --package-lock-only --ignore-scripts
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Validate resource controls
+        run: |
+          npm run check:runtime
+          npm run check:resources
+          npm run check:syntax
+          npm test
+          npm run audit:deps
+          git diff --check
+      - name: Commit validated permanent files
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp scripts/permanent-resource-ci.yml .github/workflows/ci.yml
+          git rm \
+            .github/workflows/apply-electron-resource-pass.yml \
+            scripts/apply-electron-resource-pass.py \
+            scripts/permanent-resource-ci.yml
+          git add -A
+          git commit -m "Reduce Electron startup, memory, CPU, and package size"
+          git push origin HEAD:codex/electron-resource-budget-20260820
+
   verify:
     name: Node ${{ matrix.node-version }}
     runs-on: ubuntu-latest
