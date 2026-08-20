@@ -1,6 +1,7 @@
 from pathlib import Path
 
 
+# This script is temporary and is removed after the validated application commit.
 def replace_once(source: str, old: str, new: str, label: str) -> str:
     count = source.count(old)
     if count != 1:
