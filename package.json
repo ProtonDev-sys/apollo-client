@@ -6,12 +6,13 @@
   "scripts": {
     "preinstall": "node scripts/check-engines.js",
     "start": "electron .",
+    "check:platform": "node scripts/check-electron-platform.js",
     "check:syntax": "node scripts/check-syntax.js",
     "test": "node --test",
     "test:ui": "electron --no-sandbox scripts/electron-ui-smoke.js",
     "audit:deps": "npm audit --omit=dev",
     "audit:all": "npm audit",
-    "verify": "npm run check:syntax && npm test && npm run audit:deps",
+    "verify": "npm run check:platform && npm run check:syntax && npm test && npm run audit:deps",
     "pack:linux:ci": "electron-builder --dir --linux --publish never",
     "build:discord-social-helper": "scripts\\build-discord-social-helper.cmd",
     "build:win": "npm run build:discord-social-helper && electron-builder --win nsis"
