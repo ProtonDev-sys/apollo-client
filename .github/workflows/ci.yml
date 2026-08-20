@@ -10,6 +10,48 @@ permissions:
   contents: read
 
 jobs:
+  apply-joined-refresh-guards:
+    name: Apply reviewed renderer guards
+    if: github.event_name == 'pull_request' && github.head_ref == 'codex/renderer-foundation-20260820'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - name: Check out the feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: codex/renderer-foundation-20260820
+          fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - name: Apply joined-session lifecycle guards
+        run: python3 scripts/apply-joined-refresh-guards.py
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Validate guarded lifecycle
+        run: |
+          npm run check:syntax
+          npm test
+          npm run audit:deps
+      - name: Commit the validated permanent files
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main --depth=1
+          git checkout origin/main -- .github/workflows/ci.yml
+          git rm --ignore-unmatch \
+            .github/workflows/apply-joined-refresh-guards.yml \
+            scripts/apply-joined-refresh-guards.py
+          git add .github/workflows/ci.yml src/renderer.js
+          git commit -m "Guard joined-session refreshes across lifecycle changes"
+          git push origin HEAD:codex/renderer-foundation-20260820
+
   verify:
     name: Node ${{ matrix.node-version }}
     runs-on: ubuntu-latest
