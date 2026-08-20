@@ -30,6 +30,10 @@ async function parseResponseBody(response) {
   }
 }
 
+function isFormDataBody(value) {
+  return typeof FormData !== "undefined" && value instanceof FormData;
+}
+
 export function isConnectionError(error) {
   return error?.code === "APOLLO_CONNECTION_FAILED";
 }
@@ -63,7 +67,7 @@ export function createApolloTransport({
     const headers = new Headers(fetchOptions.headers || {});
     const authHeader = typeof getAuthorizationHeader === "function" ? getAuthorizationHeader() : "";
 
-    if (fetchOptions.body != null && !(fetchOptions.body instanceof FormData) && !headers.has("Content-Type")) {
+    if (fetchOptions.body != null && !isFormDataBody(fetchOptions.body) && !headers.has("Content-Type")) {
       headers.set("Content-Type", "application/json");
     }
     if (!skipAuth && authHeader && !headers.has("Authorization")) {
@@ -178,10 +182,17 @@ export function createApolloTransport({
       return event;
     }
 
-    return consumeJsonEventStream(response, {
+    const lastEvent = await consumeJsonEventStream(response, {
       signal: options.signal || null,
       onEvent
     });
+    if (!lastEvent?.done && lastEvent?.event !== "done") {
+      const incompleteError = new Error("Apollo search stream ended before the final result arrived.");
+      incompleteError.code = "APOLLO_INCOMPLETE_STREAM";
+      throw incompleteError;
+    }
+
+    return lastEvent;
   };
 
   return requestJson;
