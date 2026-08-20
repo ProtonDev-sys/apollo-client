@@ -1,0 +1,28 @@
+name: Audit source snapshot
+
+on:
+  push:
+    branches:
+      - codex/continuous-audit-20260820
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    name: Export source tree for audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Create source archive
+        shell: bash
+        run: git archive --format=zip --output=apollo-client-source.zip HEAD
+      - name: Upload source archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: apollo-client-audit-source
+          path: apollo-client-source.zip
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
