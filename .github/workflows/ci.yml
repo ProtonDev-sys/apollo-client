@@ -35,6 +35,8 @@ jobs:
         run: npm run check:syntax
       - name: Run tests
         run: npm test
+      - name: Audit production dependencies
+        run: npm run audit:deps
 
   ui-smoke:
     name: Electron UI smoke
