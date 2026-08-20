@@ -1,0 +1,51 @@
+name: Apply consolidated search integration
+
+on:
+  push:
+    branches:
+      - codex/progressive-song-search-20260820
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    name: Apply and validate renderer search integration
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - name: Check out feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: codex/progressive-song-search-20260820
+          fetch-depth: 0
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+      - name: Apply renderer integration
+        run: python3 scripts/apply-consolidated-search.py
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+      - name: Validate Electron and search changes
+        run: |
+          npm run check:runtime
+          npm run check:syntax
+          npm test
+          npm run audit:deps
+          git diff --check
+      - name: Commit validated application files
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/renderer.js scripts/electron-ui-smoke.js
+          if git diff --cached --quiet; then
+            echo "No renderer changes remain to commit."
+            exit 0
+          fi
+          git commit -m "Consolidate progressive indexed song search"
+          git push origin HEAD:codex/progressive-song-search-20260820
