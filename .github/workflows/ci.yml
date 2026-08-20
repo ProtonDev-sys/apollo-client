@@ -10,42 +10,6 @@ permissions:
   contents: read
 
 jobs:
-  apply-progressive-search:
-    name: Apply progressive search integration
-    if: github.event_name == 'pull_request' && github.head_ref == 'codex/progressive-song-search-20260820'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
-    steps:
-      - name: Check out feature branch
-        uses: actions/checkout@v4
-        with:
-          ref: codex/progressive-song-search-20260820
-          fetch-depth: 0
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22.x
-          cache: npm
-      - name: Apply renderer integration
-        run: |
-          python3 scripts/apply-progressive-search.py
-          python3 scripts/apply-search-settings.py
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-      - name: Validate permanent client files
-        run: npm run verify
-      - name: Commit validated application files
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/renderer.js src/renderer/settings.js
-          git commit -m "Stream and index song search"
-          git push origin HEAD:codex/progressive-song-search-20260820
-
   verify:
     name: Node ${{ matrix.node-version }}
     runs-on: ubuntu-latest
