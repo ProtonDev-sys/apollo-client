@@ -79,10 +79,22 @@ function validateRuntimeFile(projectRoot, filePath, errors) {
   errors.push(`Tauri runtime reference is not allowed in ${relativePath}.`);
 }
 
+function findLockedTauriPackages(packageLock = {}) {
+  return Object.keys(packageLock.packages || {})
+    .filter((packagePath) => {
+      const packageName = packagePath.replace(/^.*node_modules\//, "");
+      return packageName === "tauri" || packageName.startsWith("@tauri-apps/");
+    });
+}
+
 function collectElectronRuntimeErrors(projectRoot) {
   const packageJson = JSON.parse(
     fs.readFileSync(path.join(projectRoot, "package.json"), "utf8")
   );
+  const packageLockPath = path.join(projectRoot, "package-lock.json");
+  const packageLock = fs.existsSync(packageLockPath)
+    ? JSON.parse(fs.readFileSync(packageLockPath, "utf8"))
+    : {};
   const dependencyGroups = [
     packageJson.dependencies,
     packageJson.devDependencies,
@@ -118,6 +130,9 @@ function collectElectronRuntimeErrors(projectRoot) {
     if (dependencyName === "tauri" || dependencyName.startsWith("@tauri-apps/")) {
       errors.push(`Tauri dependency is not allowed: ${dependencyName}`);
     }
+  }
+  for (const packagePath of findLockedTauriPackages(packageLock)) {
+    errors.push(`Tauri package is not allowed in package-lock.json: ${packagePath}`);
   }
 
   for (const entryName of FORBIDDEN_TAURI_ENTRIES) {
@@ -177,6 +192,7 @@ module.exports = {
   TAURI_COMMAND_SEGMENT_PATTERN,
   isDirectElectronStartCommand,
   hasTauriPackageCommand,
+  findLockedTauriPackages,
   walkFiles,
   validateRuntimeFile,
   collectElectronRuntimeErrors,
