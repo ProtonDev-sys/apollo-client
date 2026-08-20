@@ -3677,3 +3677,9 @@ body {
     grid-template-columns: 1fr;
   }
 }
+
+/* Electron resource containment */
+.track-row {
+  content-visibility: auto;
+  contain-intrinsic-size: 72px;
+}

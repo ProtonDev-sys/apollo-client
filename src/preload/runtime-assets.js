@@ -66,6 +66,8 @@ function createRuntimeAssetsService({
 }) {
   const events = createEventChannel();
   const watchers = [];
+  const watchRuntimeAssets = !runtimeInfo.isPackaged || env.APOLLO_WATCH_RUNTIME_ASSETS === "1";
+  let watchersInitialised = false;
   let notifyHandle = null;
   let currentAppConfig = {
     sourcePath: "",
@@ -111,8 +113,10 @@ function createRuntimeAssetsService({
   function getRuntimePluginDirectories() {
     return uniquePaths([
       env.APOLLO_PLUGIN_DIR,
-      runtimeInfo.execDirectory ? path.join(runtimeInfo.execDirectory, "plugins") : "",
-      runtimeInfo.currentWorkingDirectory ? path.join(runtimeInfo.currentWorkingDirectory, "plugins") : "",
+      ...(!runtimeInfo.isPackaged ? [
+        runtimeInfo.execDirectory ? path.join(runtimeInfo.execDirectory, "plugins") : "",
+        runtimeInfo.currentWorkingDirectory ? path.join(runtimeInfo.currentWorkingDirectory, "plugins") : ""
+      ] : []),
       runtimeInfo.userDataPath ? path.join(runtimeInfo.userDataPath, "plugins") : ""
     ]);
   }
@@ -120,8 +124,10 @@ function createRuntimeAssetsService({
   function getRuntimeThemeDirectories() {
     return uniquePaths([
       env.APOLLO_THEME_DIR,
-      runtimeInfo.execDirectory ? path.join(runtimeInfo.execDirectory, "themes") : "",
-      runtimeInfo.currentWorkingDirectory ? path.join(runtimeInfo.currentWorkingDirectory, "themes") : "",
+      ...(!runtimeInfo.isPackaged ? [
+        runtimeInfo.execDirectory ? path.join(runtimeInfo.execDirectory, "themes") : "",
+        runtimeInfo.currentWorkingDirectory ? path.join(runtimeInfo.currentWorkingDirectory, "themes") : ""
+      ] : []),
       runtimeInfo.userDataPath ? path.join(runtimeInfo.userDataPath, "themes") : ""
     ]);
   }
@@ -169,10 +175,12 @@ function createRuntimeAssetsService({
   function resolveAppConfigCandidatePaths() {
     return uniquePaths([
       env.APOLLO_CONFIG_PATH,
-      runtimeInfo.execDirectory ? path.join(runtimeInfo.execDirectory, "apollo.config.json") : "",
-      runtimeInfo.currentWorkingDirectory ? path.join(runtimeInfo.currentWorkingDirectory, "apollo.config.json") : "",
-      runtimeInfo.userDataPath ? path.join(runtimeInfo.userDataPath, "apollo.config.json") : "",
-      path.join(appRootPath, "apollo.config.json")
+      ...(!runtimeInfo.isPackaged ? [
+        runtimeInfo.execDirectory ? path.join(runtimeInfo.execDirectory, "apollo.config.json") : "",
+        runtimeInfo.currentWorkingDirectory ? path.join(runtimeInfo.currentWorkingDirectory, "apollo.config.json") : "",
+        path.join(appRootPath, "apollo.config.json")
+      ] : []),
+      runtimeInfo.userDataPath ? path.join(runtimeInfo.userDataPath, "apollo.config.json") : ""
     ]);
   }
 
@@ -437,6 +445,11 @@ function createRuntimeAssetsService({
   }
 
   function onChanged(callback) {
+    if (watchRuntimeAssets && !watchersInitialised) {
+      watchersInitialised = true;
+      initialiseWatchers();
+    }
+
     return events.subscribe(callback, () => ({
       reason: "initial",
       snapshot: getSnapshot()
@@ -466,8 +479,6 @@ function createRuntimeAssetsService({
       error: error?.message || "unknown"
     });
   }
-
-  initialiseWatchers();
 
   return {
     getAppConfig: () => loadApolloAppConfig(),
