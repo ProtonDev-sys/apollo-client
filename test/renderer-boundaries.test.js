@@ -1,0 +1,60 @@
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+
+const rendererPath = path.join(__dirname, "..", "src", "renderer.js");
+
+function readRenderer() {
+  return fs.readFileSync(rendererPath, "utf8");
+}
+
+test("renderer delegates track modeling to a focused module", () => {
+  const source = readRenderer();
+
+  assert.match(source, /from "\.\/renderer\/track-model\.js";/);
+  [
+    "buildTrackKey",
+    "normaliseProviderIds",
+    "normaliseMetadataText",
+    "normaliseTrackArtists",
+    "normaliseTrackNumberTag",
+    "normaliseTrackReleaseDate",
+    "normaliseTrackExplicitFlag",
+    "buildTrackMetadataSnapshot",
+    "getTrackNormalizedDuration",
+    "getTrackNormalizedText",
+    "hasMatchingProviderIds",
+    "hasMatchingNormalizedMetadata",
+    "areTracksEquivalent",
+    "isGenericAlbumName",
+    "isTrackLikelyPlayable"
+  ].forEach((functionName) => {
+    assert.doesNotMatch(
+      source,
+      new RegExp(`function\\s+${functionName}\\s*\\(`),
+      `${functionName} should remain in track-model.js`
+    );
+  });
+});
+
+test("listen-along fallback uses the shared polling lifecycle", () => {
+  const source = readRenderer();
+
+  assert.match(source, /from "\.\/renderer\/polling-controller\.js";/);
+  assert.match(source, /const joinedListenAlongPolling = createPollingController\(/);
+  assert.match(source, /joinedListenAlongPolling\.start\(\)/);
+  assert.match(source, /joinedListenAlongPolling\.stop\(\)/);
+  assert.doesNotMatch(source, /pollHandle\s*:/);
+  assert.doesNotMatch(source, /listenAlongState\.pollHandle/);
+});
+
+test("renderer decomposition reduces the top-level module size", () => {
+  const source = readRenderer();
+  const maximumBytes = 342000;
+
+  assert.ok(
+    Buffer.byteLength(source, "utf8") < maximumBytes,
+    `renderer.js should stay below ${maximumBytes} bytes after extraction`
+  );
+});
