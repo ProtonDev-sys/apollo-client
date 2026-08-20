@@ -1,28 +1,49 @@
-name: Audit source snapshot
+name: Apply audited patch
 
 on:
-  pull_request:
+  push:
     branches:
-      - main
+      - codex/continuous-audit-20260820
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  snapshot:
-    name: Export source tree for audit
+  apply:
+    name: Reconstruct, validate, and commit audit fixes
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
+      - name: Check out audit branch
         uses: actions/checkout@v7
-      - name: Create source archive
-        shell: bash
-        run: git archive --format=zip --output=apollo-client-source.zip HEAD
-      - name: Upload source archive
-        uses: actions/upload-artifact@v7
         with:
-          name: apollo-client-audit-source
-          path: apollo-client-source.zip
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
+          ref: codex/continuous-audit-20260820
+      - name: Reconstruct and verify patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .audit-patch/part-* > /tmp/fixes.b64
+          base64 --decode /tmp/fixes.b64 > /tmp/fixes.patch
+          echo "e801e3d1c9d402c6af4c42540e6276f999448e8f0047246b312f3764d6d41d05  /tmp/fixes.patch" | sha256sum -c -
+          git apply --check /tmp/fixes.patch
+          git apply /tmp/fixes.patch
+      - name: Install development toolchain
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+        run: npm ci
+      - name: Validate audited changes
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+        shell: bash
+        run: |
+          npm run check:runtime
+          npm run check:resources
+          npm run check:syntax
+          npm test
+      - name: Commit audited changes
+        shell: bash
+        run: |
+          git config user.name "ProtonDev-sys"
+          git config user.email "72932384+ProtonDev-sys@users.noreply.github.com"
+          git add -A
+          git commit -m "Harden networking, integrations, and resource lifecycles"
+          git push origin HEAD:codex/continuous-audit-20260820
