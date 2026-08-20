@@ -95,6 +95,20 @@ test("production packaging contains only generated and pruned Electron runtime f
   assert.equal(fs.existsSync(path.join(projectRoot, "src", "desktop", "runtime-assets.js")), false);
 });
 
+test("core Windows packages exclude optional SDKs and retain a smaller portable build", () => {
+  const packageJson = JSON.parse(read("package.json"));
+  const portableBuilder = read("scripts/build-windows-portable.js");
+
+  assert.match(packageJson.scripts["build:win"], /electron-builder --win nsis/);
+  assert.doesNotMatch(packageJson.scripts["build:win"], /build:discord-social-helper/);
+  assert.match(packageJson.scripts["pack:win:ci"], /electron-builder --win nsis/);
+  assert.match(packageJson.scripts["build:win:portable"], /build-windows-portable\.js/);
+  assert.match(packageJson.scripts["build:win:social"], /build:discord-social-helper/);
+  assert.match(portableBuilder, /DEFAULT_MAX_PORTABLE_BYTES = 78_000_000/);
+  assert.match(portableBuilder, /"-mx=9"/);
+  assert.match(portableBuilder, /"-ms=on"/);
+});
+
 test("source UI uses system fonts and the build creates minified output", () => {
   const html = read("src/index.html");
   const buildScript = read("scripts/build-app.js");
