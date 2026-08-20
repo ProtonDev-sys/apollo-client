@@ -17,7 +17,10 @@ function createProject(overrides = {}) {
     main: "main.js",
     scripts: {
       start: "electron .",
-      "build:app": "node scripts/build-app.js"
+      "build:app": "node scripts/build-app.js",
+      "build:win": "npm run build:app && electron-builder --win nsis",
+      "build:win:portable": "npm run build:app && electron-builder --dir --win && node scripts/build-windows-portable.js",
+      "build:win:social": "npm run build:app && npm run build:discord-social-helper && electron-builder --win nsis"
     },
     dependencies: {},
     devDependencies: {
@@ -59,6 +62,10 @@ function createProject(overrides = {}) {
     path.join(projectRoot, "scripts", "prune-electron-runtime.js"),
     "module.exports = async function afterPack() {};\n"
   );
+  fs.writeFileSync(
+    path.join(projectRoot, "scripts", "build-windows-portable.js"),
+    "module.exports = {};\n"
+  );
 
   if (overrides.retiredReference) {
     fs.writeFileSync(
@@ -83,7 +90,7 @@ test("compact file-set validation requires generated runtime mapping", () => {
   assert.equal(hasDistFileSet([{ from: "dist-app", to: "app" }]), false);
 });
 
-test("Electron-only boundary accepts a compact project", (context) => {
+test("Electron-only boundary accepts compact core, portable, and optional social builds", (context) => {
   const projectRoot = createProject();
   context.after(() => fs.rmSync(projectRoot, { recursive: true, force: true }));
   assert.deepEqual(collectElectronRuntimeErrors(projectRoot), []);
@@ -95,7 +102,10 @@ test("Electron-only boundary rejects mixed toolchains and broad packaging", (con
       main: "desktop.js",
       scripts: {
         start: "echo electron",
-        "build:app": "echo build"
+        "build:app": "echo build",
+        "build:win": "npm run build:discord-social-helper && electron-builder --win nsis",
+        "build:win:portable": "electron-builder --dir --win",
+        "build:win:social": "electron-builder --win nsis"
       },
       dependencies: {
         "runtime-package": "1.0.0"
@@ -129,6 +139,9 @@ test("Electron-only boundary rejects mixed toolchains and broad packaging", (con
   const errors = collectElectronRuntimeErrors(projectRoot).join("\n");
   assert.match(errors, /main\.js/);
   assert.match(errors, /direct Electron launch/);
+  assert.match(errors, /compact Electron core/);
+  assert.match(errors, /optional Discord Social build/);
+  assert.match(errors, /build-windows-portable/);
   assert.match(errors, /Production dependencies/);
   assert.match(errors, /toolchain allowlist/);
   assert.match(errors, /ASAR/);
@@ -139,18 +152,18 @@ test("Electron-only boundary rejects mixed toolchains and broad packaging", (con
   assert.match(errors, /Retired desktop-shell reference/);
 });
 
-test("Electron-only boundary rejects a missing runtime pruning hook", (context) => {
+test("Electron-only boundary rejects missing packaging helpers", (context) => {
   const projectRoot = createProject();
   context.after(() => fs.rmSync(projectRoot, { recursive: true, force: true }));
   const packagePath = path.join(projectRoot, "package.json");
   const packageJson = JSON.parse(fs.readFileSync(packagePath, "utf8"));
   delete packageJson.build.afterPack;
   fs.writeFileSync(packagePath, JSON.stringify(packageJson));
+  fs.rmSync(path.join(projectRoot, "scripts", "build-windows-portable.js"));
 
-  assert.match(
-    collectElectronRuntimeErrors(projectRoot).join("\n"),
-    /prune-electron-runtime/
-  );
+  const errors = collectElectronRuntimeErrors(projectRoot).join("\n");
+  assert.match(errors, /prune-electron-runtime/);
+  assert.match(errors, /build-windows-portable/);
 });
 
 test("retired desktop references are detected across documentation and source", (context) => {
