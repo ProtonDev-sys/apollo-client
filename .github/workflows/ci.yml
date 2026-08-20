@@ -61,16 +61,12 @@ jobs:
           npm test
           npm run audit:deps
           git diff --check
-      - name: Commit validated permanent files
+      - name: Commit validated application files
         shell: bash
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          cp scripts/permanent-resource-ci.yml .github/workflows/ci.yml
-          git rm \
-            .github/workflows/apply-electron-resource-pass.yml \
-            scripts/apply-electron-resource-pass.py \
-            scripts/permanent-resource-ci.yml
+          git rm scripts/apply-electron-resource-pass.py scripts/permanent-resource-ci.yml
           git add -A
           git commit -m "Reduce Electron startup, memory, CPU, and package size"
           git push origin HEAD:codex/electron-resource-budget-20260820
