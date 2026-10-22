@@ -12,7 +12,7 @@ permissions:
 jobs:
   verify:
     name: Verify on Node.js ${{ matrix.node-version }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ contains(fromJSON('["push","schedule","workflow_dispatch","release"]'), github.event_name) && vars.CI_SERVER_LINUX == 'true' && fromJSON('["self-hosted","Linux","X64","desktop-3flaofg","ubuntu-24.04"]') || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
       matrix:
@@ -38,7 +38,7 @@ jobs:
 
   ui-smoke:
     name: Native Electron UI smoke
-    runs-on: ubuntu-latest
+    runs-on: ${{ contains(fromJSON('["push","schedule","workflow_dispatch","release"]'), github.event_name) && vars.CI_SERVER_LINUX == 'true' && fromJSON('["self-hosted","Linux","X64","desktop-3flaofg","ubuntu-24.04"]') || 'ubuntu-latest' }}
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
       ELECTRON_DISABLE_SECURITY_WARNINGS: "true"
@@ -67,7 +67,7 @@ jobs:
 
   linux-package:
     name: Compact Linux package
-    runs-on: ubuntu-latest
+    runs-on: ${{ contains(fromJSON('["push","schedule","workflow_dispatch","release"]'), github.event_name) && vars.CI_SERVER_LINUX == 'true' && fromJSON('["self-hosted","Linux","X64","desktop-3flaofg","ubuntu-24.04"]') || 'ubuntu-latest' }}
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
     steps:
@@ -136,7 +136,7 @@ jobs:
 
   windows-package:
     name: Compact Windows distributions
-    runs-on: windows-latest
+    runs-on: ${{ contains(fromJSON('["push","schedule","workflow_dispatch","release"]'), github.event_name) && vars.CI_SERVER_WINDOWS == 'true' && fromJSON('["self-hosted","Windows","X64","desktop-3flaofg"]') || 'windows-latest' }}
     env:
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
     steps:
